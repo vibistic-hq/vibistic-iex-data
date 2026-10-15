@@ -1,0 +1,7 @@
+bin/
+out/
+site/
+days/
+*.part
+__pycache__/
+*.local.md

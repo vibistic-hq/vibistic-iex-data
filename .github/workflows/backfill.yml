@@ -1,0 +1,96 @@
+name: Backfill
+
+# Archives every IEX session from start to end that is not archived yet, then
+# publishes. About 5 minutes a session on a free runner.
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: First date (YYYYMMDD)
+        required: true
+      end:
+        description: Last date (YYYYMMDD)
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: archive
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    if: github.repository == 'vibistic-hq/vibistic-iex-data' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      chunks: ${{ steps.plan.outputs.chunks }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          START: ${{ inputs.start }}
+          END: ${{ inputs.end }}
+        run: |
+          [[ "$START" =~ ^20[0-9]{6}$ && "$END" =~ ^20[0-9]{6}$ ]] || { echo "dates must be YYYYMMDD" >&2; exit 1; }
+          scripts/archived-days.sh > archived.txt
+          curl -sf --retry 3 https://iextrading.com/api/1.0/hist | jq -r 'keys[]' \
+            | grep -E '^20[0-9]{6}$' | awk -v s="$START" -v e="$END" '$1 >= s && $1 <= e' \
+            | { grep -vxF -f archived.txt || true; } > todo.txt
+          echo "$(wc -l < todo.txt) sessions to archive"
+          # Up to 200 jobs, dates dealt out round-robin.
+          chunks=$(jq -R -s -c 'split("\n") | map(select(length > 0)) | . as $d
+            | [range(0; ([200, ($d | length)] | min)) as $i | [range($i; ($d | length); 200) as $j | $d[$j]] | join(" ")]' todo.txt)
+          echo "chunks=$chunks" >> "$GITHUB_OUTPUT"
+
+  days:
+    needs: plan
+    if: needs.plan.outputs.chunks != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: write # release assets only
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        dates: ${{ fromJSON(needs.plan.outputs.chunks) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - run: go build -o bin/iexagg ./cmd/iexagg
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          DATES: ${{ matrix.dates }}
+        run: |
+          mkdir -p out
+          failed=0
+          for d in $DATES; do
+            rc=0; scripts/process-day.sh "$d" out || rc=$?
+            [ "$rc" = 3 ] && continue
+            if [ "$rc" = 4 ]; then echo "::warning::$d: IEX's file is incomplete, day left out"; continue; fi
+            if [ "$rc" != 0 ]; then echo "::warning::$d failed ($rc)"; failed=1; continue; fi
+            scripts/archive-day.sh "$d" out
+            rm -f "out/$d.jsonl.gz"
+          done
+          exit "$failed"
+
+  publish:
+    needs: [plan, days]
+    # Never deploy a partial backfill: publish only when every shard succeeded
+    # (or there was nothing to do). The nightly run publishes the rest.
+    if: always() && needs.plan.result == 'success' && (needs.days.result == 'success' || needs.days.result == 'skipped')
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/publish.yml

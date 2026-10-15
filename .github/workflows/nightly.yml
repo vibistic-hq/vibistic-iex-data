@@ -1,0 +1,70 @@
+name: Nightly
+
+# IEX publishes each session's file between about 04:20 and 05:30 UTC the
+# next morning. Looks back 10 days, so a missed night catches up. GitHub can
+# delay or drop scheduled runs (most often on the hour; the first one, due
+# 2026-10-14, never started), so it runs off the hour and again three
+# hours later. The second run skips archived days, so it adds nothing unless the
+# first was dropped, failed, or met a day not yet published or incomplete (exit 4,
+# retried every run until IEX's file is whole).
+on:
+  schedule:
+    - cron: '23 7 * * 2-6'
+    - cron: '23 10 * * 2-6'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: archive
+  cancel-in-progress: false
+
+jobs:
+  archive:
+    if: github.repository == 'vibistic-hq/vibistic-iex-data' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write # release assets only
+    outputs:
+      added: ${{ steps.days.outputs.added }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - run: go build -o bin/iexagg ./cmd/iexagg
+      - id: days
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/archived-days.sh > archived.txt
+          mkdir -p out
+          added=0
+          for i in $(seq 10 -1 1); do
+            d=$(TZ=America/New_York date -d "$i days ago" +%Y%m%d)
+            case $(date -d "$d" +%u) in 6|7) continue ;; esac
+            grep -qx "$d" archived.txt && continue
+            rc=0; scripts/process-day.sh "$d" out || rc=$?
+            [ "$rc" = 3 ] && continue
+            # Incomplete IEX file: not archived, so later nights retry it in
+            # case IEX republishes the day.
+            if [ "$rc" = 4 ]; then echo "::warning::$d: IEX's file is incomplete, day left out"; continue; fi
+            [ "$rc" = 0 ] || exit "$rc"
+            scripts/archive-day.sh "$d" out
+            added=$((added + 1))
+          done
+          echo "added=$added" >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: archive
+    if: needs.archive.outputs.added != '0'
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/publish.yml
