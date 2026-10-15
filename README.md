@@ -27,7 +27,7 @@ The data reflects trading on IEX only, not other markets. It is a reference poin
    - **Reviewed exceptions** in `splits-reviewed.json` (by pull request only) win over the rules: `split` (with the share ratio), `real` (a real move, not a break) or `break`. Each must sit on a real gap (a split near its ratio, a real move of 30% or more; a forced break anywhere), or the build fails rather than adjust the wrong bars.
    - Dividends are not adjusted, like the split-only bars Vibistic Stocks uses from Alpaca.
 
-Workflows: `nightly.yml` (07:23 UTC Tuesday to Saturday, again at 10:23 in case GitHub drops a scheduled run, catching up on the last 10 days), `backfill.yml` (a date range, by hand), `publish.yml` (build and deploy Pages). They use no stored secrets: release assets go up with the workflow's own token, Pages deploys with GitHub's.
+Workflows: `nightly.yml` (every 30 minutes from 03:07 to 11:37 UTC Tuesday to Saturday, and at 21:07, so each day goes up soon after IEX posts it; catches up on the last 10 days and does not download an incomplete IEX file again until IEX replaces it), `backfill.yml` (a date range, by hand), `publish.yml` (build and deploy Pages). They use no stored secrets: release assets go up with the workflow's own token, Pages deploys with GitHub's.
 
 `tools/validate.py` is a developer-only check against Alpaca's full-market data (it needs a personal Alpaca key and is never run in CI). Alpaca licenses that data for the key holder's own use, so its results are never published: see [`docs/validation.md`](docs/validation.md).
 

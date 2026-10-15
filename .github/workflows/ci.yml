@@ -29,5 +29,7 @@ jobs:
         run: go run ./cmd/build -validate
       - name: Scripts parse
         run: for f in scripts/*.sh; do bash -n "$f"; done
+      - name: process-day.sh and session-days.sh
+        run: bash scripts/test-process-day.sh && bash scripts/test-session-days.sh
       - name: No licensed figures
         run: bash scripts/test-check-no-licensed-figures.sh && bash scripts/check-no-licensed-figures.sh
