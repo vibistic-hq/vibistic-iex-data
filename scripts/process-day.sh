@@ -38,18 +38,29 @@ if [ -n "${IEX_INCOMPLETE:-}" ] && [ -n "$gen" ] && [ -f "$IEX_INCOMPLETE" ] && 
 fi
 
 tmp="$out/$d.jsonl.gz.part"
-# A cut-off download fails gzip's own length and CRC check at the end, and
-# pipefail turns that into a failure here.
+# A cut-off download fails gzip's own length and CRC check at the end. Each
+# stage's status is checked: a broken download or decompression is a plain
+# failure (exit 1), and only a whole file that iexagg finds incomplete is 4.
+set +e
+curl -sf --retry 3 "$link" | gzip -dc | "$bin" "${d:0:4}-${d:4:2}-${d:6:2}" | gzip -9 > "$tmp"
+st=("${PIPESTATUS[@]}")
+set -e
 rc=0
-curl -sf --retry 3 "$link" | gzip -dc | "$bin" "${d:0:4}-${d:4:2}-${d:6:2}" | gzip -9 > "$tmp" || rc=$?
+if [ "${st[0]}" != 0 ] || [ "${st[1]}" != 0 ]; then
+  echo "download of IEX's file for $d failed (curl ${st[0]}, gzip ${st[1]})" >&2
+  rc=1
+elif [ "${st[2]}" != 0 ]; then
+  rc=${st[2]}
+elif [ "${st[3]}" != 0 ]; then
+  rc=1
+fi
 if [ "$rc" != 0 ]; then
   rm -f "$tmp"
-  # pipefail reports the last stage that failed: 4 only when iexagg said so.
   if [ "$rc" = 4 ]; then
     echo "IEX's file for $d does not cover the regular session; day left out" >&2
     # Without a generation the file cannot be told apart from a replacement, so
     # it is not recorded and later runs read it again.
-    [ -n "${IEX_INCOMPLETE:-}" ] && [ -n "$gen" ] && echo "$d $gen" >> "$IEX_INCOMPLETE"
+    if [ -n "${IEX_INCOMPLETE:-}" ] && [ -n "$gen" ]; then echo "$d $gen" >> "$IEX_INCOMPLETE"; fi
   fi
   exit "$rc"
 fi

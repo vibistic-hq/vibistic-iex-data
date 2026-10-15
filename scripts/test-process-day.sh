@@ -8,7 +8,8 @@ trap 'rm -rf "$dir"' EXIT
 mkdir -p "$dir/bin" "$dir/out"
 
 # curl: with -o, writes the index (generation from $dir/gen) and prints 200;
-# otherwise it is the download, logged to $dir/downloads, a tiny gzip stream.
+# otherwise it is the download, logged to $dir/downloads: a tiny gzip stream,
+# or with $dir/dl-mode set, a corrupt one (badgzip) or a failed transfer (fail).
 cat > "$dir/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 out=""
@@ -24,7 +25,11 @@ if [ -n "$out" ]; then
   printf 200
 else
   echo download >> "$FAKE/downloads"
-  printf 'pcap' | gzip -c
+  case "$(cat "$FAKE/dl-mode" 2>/dev/null)" in
+    badgzip) printf 'pcap' | gzip -c | head -c 12 ;;
+    fail) printf 'pcap' | gzip -c | head -c 12; exit 18 ;;
+    *) printf 'pcap' | gzip -c ;;
+  esac
 fi
 EOF
 # iexagg: reads its input, then exits with $dir/agg-rc (4: incomplete).
@@ -84,5 +89,19 @@ want_downloads 6
 echo '?generation=12x4&alt=media' > "$dir/gen"
 run 4 IEX_INCOMPLETE="$list"
 [ ! -s "$list" ] || { echo "FAIL: recorded a malformed generation" >&2; exit 1; }
+
+# A broken download is a plain failure (exit 1), never recorded as incomplete,
+# even when iexagg, fed a cut-off stream, says the session is not covered.
+echo '?generation=444&alt=media' > "$dir/gen"
+: > "$list"
+for mode in badgzip fail; do
+  echo "$mode" > "$dir/dl-mode"
+  run 1 IEX_INCOMPLETE="$list"
+  [ ! -s "$list" ] || { echo "FAIL: recorded a broken download ($mode)" >&2; exit 1; }
+done
+rm -f "$dir/dl-mode"
+# The same generation, downloaded whole this time, is read normally.
+run 4 IEX_INCOMPLETE="$list"
+[ "$(cat "$list")" = "20010102 444" ] || { echo "FAIL: list holds: $(cat "$list")" >&2; exit 1; }
 
 echo "process-day.sh: ok"

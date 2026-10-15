@@ -4,10 +4,11 @@ name: Nightly
 # 09:59 UTC, now and then as late as the next evening. So this runs every 30
 # minutes from 03:07 to 11:37 UTC and again at 21:07, off the hour (GitHub
 # delays or drops scheduled runs most often on the hour). A run with nothing new
-# only asks IEX's index and stops. Looks back 10 days, so a missed run or night
-# catches up. An incomplete IEX file (exit 4) is remembered by its generation and
-# not downloaded again (exit 5) until IEX replaces it; the list is kept between
-# runs in the Actions cache.
+# only asks IEX's index and stops. Looks back 10 days and at today in New York
+# (scripts/session-days.sh), so a missed run or night catches up. An incomplete
+# IEX file (exit 4) is remembered by its generation and not downloaded again
+# (exit 5) until IEX replaces it; the list is kept between runs in the Actions
+# cache.
 on:
   schedule:
     - cron: '7,37 3-11 * * 2-6'
@@ -39,11 +40,12 @@ jobs:
           go-version-file: go.mod
           cache: false
       - run: go build -o bin/iexagg ./cmd/iexagg
-      # Each run saves under its own key; the newest saved list is restored.
+      # Each run (and re-run attempt) saves under its own key; the newest saved
+      # list is restored.
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: incomplete.txt
-          key: iex-incomplete-${{ github.run_id }}
+          key: iex-incomplete-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: iex-incomplete-
       - id: days
         env:
@@ -57,9 +59,7 @@ jobs:
           export IEX_INCOMPLETE="$PWD/incomplete.txt"
           mkdir -p out
           added=0
-          for i in $(seq 10 -1 1); do
-            d=$(TZ=America/New_York date -d "$i days ago" +%Y%m%d)
-            case $(date -d "$d" +%u) in 6|7) continue ;; esac
+          for d in $(scripts/session-days.sh); do
             grep -qx "$d" archived.txt && continue
             rc=0; scripts/process-day.sh "$d" out || rc=$?
             [ "$rc" = 3 ] && continue
@@ -81,7 +81,7 @@ jobs:
         if: always() && steps.days.outputs.incomplete_changed == '1'
         with:
           path: incomplete.txt
-          key: iex-incomplete-${{ github.run_id }}
+          key: iex-incomplete-${{ github.run_id }}-${{ github.run_attempt }}
 
   publish:
     needs: archive
