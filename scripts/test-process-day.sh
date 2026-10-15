@@ -9,7 +9,9 @@ mkdir -p "$dir/bin" "$dir/out"
 
 # curl: with -o, writes the index (generation from $dir/gen) and prints 200;
 # otherwise it is the download, logged to $dir/downloads: a tiny gzip stream,
-# or with $dir/dl-mode set, a corrupt one (badgzip) or a failed transfer (fail).
+# or with $dir/dl-mode set, a corrupt one (badgzip), a cut-off transfer (fail)
+# or a whole stream that curl still reports as failed (curlfail). With
+# $dir/index set to 404 or nofeed, the index has no file for the day.
 cat > "$dir/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 out=""
@@ -20,6 +22,10 @@ while [ $# -gt 0 ]; do
   shift
 done
 if [ -n "$out" ]; then
+  case "$(cat "$FAKE/index" 2>/dev/null)" in
+    404) printf 404; exit 0 ;;
+    nofeed) printf '[{"link":"x","feed":"DEEP","version":"1.0"}]' > "$out"; printf 200; exit 0 ;;
+  esac
   gen=$(cat "$FAKE/gen")
   printf '[{"link":"https://www.googleapis.com/download/storage/v1/b/iex/o/data%%2Ff.pcap.gz%s","feed":"TOPS","version":"1.6"}]' "$gen" > "$out"
   printf 200
@@ -28,6 +34,7 @@ else
   case "$(cat "$FAKE/dl-mode" 2>/dev/null)" in
     badgzip) printf 'pcap' | gzip -c | head -c 12 ;;
     fail) printf 'pcap' | gzip -c | head -c 12; exit 18 ;;
+    curlfail) printf 'pcap' | gzip -c; exit 18 ;;
     *) printf 'pcap' | gzip -c ;;
   esac
 fi
@@ -40,7 +47,10 @@ rc=$(cat "$FAKE/agg-rc")
 [ "$rc" = 0 ] && echo '{}'
 exit "$rc"
 EOF
-chmod +x "$dir/bin/curl" "$dir/bin/iexagg"
+# gzip: the real one, except that compressing (-9) fails with $dir/gzip-out-fail.
+real_gzip=$(command -v gzip)
+printf '#!/usr/bin/env bash\nif [ "$1" = -9 ] && [ -f "%s/gzip-out-fail" ]; then cat > /dev/null; exit 1; fi\nexec "%s" "$@"\n' "$dir" "$real_gzip" > "$dir/bin/gzip"
+chmod +x "$dir/bin/curl" "$dir/bin/iexagg" "$dir/bin/gzip"
 export FAKE="$dir" IEXAGG="$dir/bin/iexagg" PATH="$dir/bin:$PATH"
 list="$dir/incomplete.txt"
 
@@ -94,7 +104,7 @@ run 4 IEX_INCOMPLETE="$list"
 # even when iexagg, fed a cut-off stream, says the session is not covered.
 echo '?generation=444&alt=media' > "$dir/gen"
 : > "$list"
-for mode in badgzip fail; do
+for mode in badgzip fail curlfail; do
   echo "$mode" > "$dir/dl-mode"
   run 1 IEX_INCOMPLETE="$list"
   [ ! -s "$list" ] || { echo "FAIL: recorded a broken download ($mode)" >&2; exit 1; }
@@ -103,5 +113,24 @@ rm -f "$dir/dl-mode"
 # The same generation, downloaded whole this time, is read normally.
 run 4 IEX_INCOMPLETE="$list"
 [ "$(cat "$list")" = "20010102 444" ] || { echo "FAIL: list holds: $(cat "$list")" >&2; exit 1; }
+
+# Writing the output fails while iexagg says incomplete: exit 1, not recorded.
+: > "$list"
+touch "$dir/gzip-out-fail"
+run 1 IEX_INCOMPLETE="$list"
+[ ! -s "$list" ] || { echo "FAIL: recorded a file whose output failed" >&2; exit 1; }
+rm -f "$dir/gzip-out-fail"
+# iexagg failing for another reason is passed on, not recorded.
+echo 1 > "$dir/agg-rc"
+run 1 IEX_INCOMPLETE="$list"
+[ ! -s "$list" ] || { echo "FAIL: recorded an iexagg failure" >&2; exit 1; }
+# No file for the day: exit 3, nothing downloaded.
+n=$(downloads)
+for index in 404 nofeed; do
+  echo "$index" > "$dir/index"
+  run 3 IEX_INCOMPLETE="$list"
+done
+rm -f "$dir/index"
+want_downloads "$n"
 
 echo "process-day.sh: ok"
