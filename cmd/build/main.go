@@ -1,5 +1,7 @@
 // Command build turns the archive of day files into the published site:
-// v1/s/{SYMBOL}.json for every symbol, v1/manifest.json and an index page.
+// v1/s/{SYMBOL}.json for every symbol, v1/og/{SYMBOL}.png (the preview image
+// of Vibistic Stocks share links) for every covered symbol, v1/manifest.json
+// and an index page.
 //
 //	build -days days/ -reviewed splits-reviewed.json -out site/
 package main
@@ -14,11 +16,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/vibistic-hq/vibistic-iex-data/internal/day"
+	"github.com/vibistic-hq/vibistic-iex-data/internal/og"
 	"github.com/vibistic-hq/vibistic-iex-data/internal/series"
 )
 
@@ -84,6 +89,9 @@ func run(daysDir, reviewedPath, out string, now time.Time) error {
 			return err
 		}
 	}
+	if err := writeImages(filepath.Join(out, "v1", "og"), files, now); err != nil {
+		return err
+	}
 	asOf := days[len(days)-1].Date
 	manifest := map[string]any{"v": 1, "source": "IEX", "citation": series.Citation, "termsUrl": series.TermsURL, "asOf": asOf, "generatedAt": now.UTC().Format(time.RFC3339), "sessions": len(days), "symbols": len(files), "covered": ok}
 	if err := writeJSON(filepath.Join(out, "v1", "manifest.json"), manifest); err != nil {
@@ -94,6 +102,67 @@ func run(daysDir, reviewedPath, out string, now time.Time) error {
 	}
 	fmt.Fprintf(os.Stderr, "build: %d sessions to %s, %d symbols (%d with enough IEX trading)\n", len(days), asOf, len(files), ok)
 	return os.WriteFile(filepath.Join(out, "index.html"), []byte(indexPage(asOf, len(files), ok)), 0o644)
+}
+
+// writeImages draws every covered symbol's preview image, in parallel. Any
+// failure, or an image over og.MaxBytes, fails the build (and so the
+// publish, which keeps the last deployment).
+func writeImages(dir string, files map[string]*series.File, now time.Time) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	syms := make(chan string)
+	errs := make(chan error, 1)
+	var wg sync.WaitGroup
+	for range runtime.NumCPU() {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for sym := range syms {
+				if err := writeImage(dir, files[sym], now); err != nil {
+					select {
+					case errs <- fmt.Errorf("%s: %w", sym, err):
+					default:
+					}
+				}
+			}
+		}()
+	}
+	for sym, f := range files {
+		if f.Coverage != "ok" {
+			continue
+		}
+		// A file the app would refuse gets no image (its share page shows the
+		// generic card); a slip in our own output, so say which.
+		if err := og.Accepted(f); err != nil {
+			fmt.Fprintf(os.Stderr, "build: no preview image for %s: the app would reject its file: %v\n", sym, err)
+			continue
+		}
+		syms <- sym
+	}
+	close(syms)
+	wg.Wait()
+	select {
+	case err := <-errs:
+		return err
+	default:
+		return nil
+	}
+}
+
+func writeImage(dir string, f *series.File, now time.Time) error {
+	card, err := og.NewCard(f, now)
+	if err != nil {
+		return err
+	}
+	b, err := og.Render(card)
+	if err != nil {
+		return err
+	}
+	if len(b) > og.MaxBytes {
+		return fmt.Errorf("preview image is %d bytes (limit %d)", len(b), og.MaxBytes)
+	}
+	return os.WriteFile(filepath.Join(dir, f.Symbol+".png"), b, 0o644)
 }
 
 func readReviews(path string) ([]series.Review, error) {
@@ -156,7 +225,7 @@ func indexPage(asOf string, symbols, covered int) string {
 <p>Daily bars built from IEX trades, for <a href="https://stocks.vibistic.com/">Vibistic Stocks</a>. Data as of the close of ` + e(asOf) + `: ` + fmt.Sprint(symbols) + ` symbols, ` + fmt.Sprint(covered) + ` with enough IEX trading to show numbers.</p>
 <p>` + e(series.Citation) + ` <a href="` + e(series.TermsURL) + `">IEX Historical Data Terms of Use</a>.</p>
 <p>The data reflects trading on IEX only, not other markets, and is a reference point only, not a basis for trading decisions. Not investment advice.</p>
-<p>Files: <code>v1/manifest.json</code> and <code>v1/s/{SYMBOL}.json</code>. How they are made: <a href="https://github.com/vibistic-hq/vibistic-iex-data">github.com/vibistic-hq/vibistic-iex-data</a>.</p>
+<p>Files: <code>v1/manifest.json</code>, <code>v1/s/{SYMBOL}.json</code> and, for symbols with enough IEX trading, <code>v1/og/{SYMBOL}.png</code> (the preview image of a Vibistic Stocks share link). How they are made: <a href="https://github.com/vibistic-hq/vibistic-iex-data">github.com/vibistic-hq/vibistic-iex-data</a>.</p>
 </body></html>
 `
 }
