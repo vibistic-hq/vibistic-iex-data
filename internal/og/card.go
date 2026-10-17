@@ -59,8 +59,8 @@ func Bars(f *series.File) []Bar {
 // computeRow with src/iex/facts.ts iexRowOf). `now` is the build time: it only
 // decides whether a short history counts as a recent listing.
 func NewCard(f *series.File, now time.Time) (*Card, error) {
-	if f.Coverage != "ok" || len(f.Bars) == 0 {
-		return nil, fmt.Errorf("%s: no bars", f.Symbol)
+	if err := Accepted(f); err != nil {
+		return nil, fmt.Errorf("%s: the app would reject this file: %w", f.Symbol, err)
 	}
 	bars := Bars(f)
 	last := bars[len(bars)-1]

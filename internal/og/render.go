@@ -3,6 +3,7 @@ package og
 import (
 	"bytes"
 	_ "embed"
+	"fmt"
 	"image"
 	"image/color"
 	"image/draw"
@@ -22,6 +23,10 @@ import (
 const (
 	Width  = 1200
 	Height = 630
+	// The left column's width: up to 20 px before the chart.
+	LeftWidth  = ChartLeft - 64 - 20
+	ChartLeft  = 640
+	statColumn = 270
 	// MaxBytes: an image larger than this fails the build (social sites allow
 	// 5 MB; the site's 1 GB Pages budget is the real limit).
 	MaxBytes = 300 * 1024
@@ -76,10 +81,12 @@ type canvas struct {
 	img   *image.RGBA
 	faces faces
 	cache map[string]font.Face
+	// Every text drawn, for the layout tests.
+	boxes []image.Rectangle
 }
 
 func (c *canvas) face(f *opentype.Font, name string, size float64) font.Face {
-	key := name + "/" + strings.TrimRight(strings.TrimRight(fixed.Int26_6(size*64).String(), "0"), ".")
+	key := fmt.Sprintf("%s/%.4f", name, size)
 	if fc, ok := c.cache[key]; ok {
 		return fc
 	}
@@ -98,8 +105,21 @@ func (c *canvas) bold(size float64) font.Face     { return c.face(c.faces.bold, 
 // text draws s with its baseline at y; returns the x after it.
 func (c *canvas) text(face font.Face, col color.Color, x, y int, s string) int {
 	d := &font.Drawer{Dst: c.img, Src: image.NewUniform(col), Face: face, Dot: fixed.P(x, y)}
+	b, _ := d.BoundString(s)
+	c.boxes = append(c.boxes, image.Rect(b.Min.X.Floor(), b.Min.Y.Floor(), b.Max.X.Ceil(), b.Max.Y.Ceil()))
 	d.DrawString(s)
 	return d.Dot.X.Round()
+}
+
+// fit: the largest size from `size` down (in steps of 2, not under `least`)
+// at which `width` holds the texts measured together.
+func fit(face func(float64) font.Face, size, least float64, width int, measureAt func(f func(float64) font.Face, size float64) int) float64 {
+	for ; size > least; size -= 2 {
+		if measureAt(face, size) <= width {
+			return size
+		}
+	}
+	return least
 }
 
 func measure(face font.Face, s string) int { return font.MeasureString(face, s).Round() }
@@ -194,28 +214,51 @@ func signColor(v *float64) color.Color {
 
 // Render draws the card as a PNG.
 func Render(card *Card) ([]byte, error) {
+	b, _, err := render(card)
+	return b, err
+}
+
+// render also returns where every text went.
+func render(card *Card) ([]byte, []image.Rectangle, error) {
 	fs, err := loadFaces()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	c := &canvas{img: image.NewRGBA(image.Rect(0, 0, Width, Height)), faces: fs, cache: map[string]font.Face{}}
 	c.rect(bg, c.img.Bounds())
 
-	// Left: the stock and its numbers.
+	// Left: the stock and its numbers, each shrunk to fit its space (a long
+	// symbol, a price in the millions) so nothing runs under the chart.
 	const left = 64
 	c.text(c.semiBold(26), accent, left, 74, "Vibistic Stocks")
-	c.text(c.bold(84), ink, left, 168, card.Symbol)
+	symSize := fit(c.bold, 84, 36, LeftWidth, func(f func(float64) font.Face, size float64) int { return measure(f(size), card.Symbol) })
+	c.text(c.bold(symSize), ink, left, 168, card.Symbol)
 	c.text(c.regular(24), dim, left, 210, "IEX close, "+Date(card.AsOf))
 	price := card.Close
-	x := c.text(c.bold(64), ink, left, 284, CellPrice(&price))
-	c.text(c.semiBold(34), signColor(card.Change), x+18, 284, Percent(card.Change))
+	priceText, changeText := CellPrice(&price), Percent(card.Change)
+	priceSize := fit(c.bold, 64, 30, LeftWidth, func(f func(float64) font.Face, size float64) int {
+		return measure(f(size), priceText) + 18 + measure(c.semiBold(size*34/64), changeText)
+	})
+	x := c.text(c.bold(priceSize), ink, left, 284, priceText)
+	c.text(c.semiBold(priceSize*34/64), signColor(card.Change), x+18, 284, changeText)
 
 	stat := func(col, row int, label, value string, extra *float64) {
-		sx, sy := left+col*270, 340+row*72
+		sx, sy := left+col*statColumn, 340+row*72
 		c.text(c.regular(20), dim, sx, sy, label)
-		vx := c.text(c.semiBold(28), ink, sx, sy+34, value)
+		pct := ""
 		if extra != nil {
-			c.text(c.semiBold(22), signColor(extra), vx+10, sy+34, Percent(extra))
+			pct = Percent(extra)
+		}
+		size := fit(c.semiBold, 28, 14, statColumn-20, func(f func(float64) font.Face, size float64) int {
+			w := measure(f(size), value)
+			if pct != "" {
+				w += 10 + measure(f(size*22/28), pct)
+			}
+			return w
+		})
+		vx := c.text(c.semiBold(size), ink, sx, sy+34, value)
+		if pct != "" {
+			c.text(c.semiBold(size*22/28), signColor(extra), vx+10, sy+34, pct)
 		}
 	}
 	stat(0, 0, "52-week low", CellPrice(card.Low52), nil)
@@ -224,7 +267,7 @@ func Render(card *Card) ([]byte, error) {
 	stat(1, 1, "200-day SMA", CellPrice(card.SMA200), card.Vs200)
 
 	// Right: six months of closes and the 50 SMA.
-	chart := image.Rect(640, 56, 1140, 468)
+	chart := image.Rect(ChartLeft, 56, 1140, 468)
 	c.rect(panel, chart)
 	c.text(c.regular(18), dim, chart.Min.X+16, chart.Min.Y+28, "Last 6 months: close")
 	lx := c.text(c.regular(18), dim, chart.Min.X+16, chart.Min.Y+28, "Last 6 months: close ")
@@ -253,8 +296,12 @@ func Render(card *Card) ([]byte, error) {
 		c.rect(rule, image.Rect(plot.Min.X, plot.Min.Y, plot.Max.X, plot.Min.Y+1))
 		c.rect(rule, image.Rect(plot.Min.X, plot.Max.Y, plot.Max.X, plot.Max.Y+1))
 		top, bottom := hi, lo
-		c.text(c.regular(18), dim, plot.Max.X+10, plot.Min.Y+6, CellPrice(&top))
-		c.text(c.regular(18), dim, plot.Max.X+10, plot.Max.Y+6, CellPrice(&bottom))
+		topText, bottomText := CellPrice(&top), CellPrice(&bottom)
+		axisSize := fit(c.regular, 18, 10, chart.Max.X-plot.Max.X-14, func(f func(float64) font.Face, size float64) int {
+			return max(measure(f(size), topText), measure(f(size), bottomText))
+		})
+		c.text(c.regular(axisSize), dim, plot.Max.X+10, plot.Min.Y+6, topText)
+		c.text(c.regular(axisSize), dim, plot.Max.X+10, plot.Max.Y+6, bottomText)
 		var smaPts [][2]float32
 		closePts := make([][2]float32, 0, len(card.Chart))
 		for i, p := range card.Chart {
@@ -305,9 +352,9 @@ func Render(card *Card) ([]byte, error) {
 	}
 	var buf bytes.Buffer
 	if err := (&png.Encoder{CompressionLevel: png.DefaultCompression}).Encode(&buf, out); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return buf.Bytes(), nil
+	return buf.Bytes(), c.boxes, nil
 }
 
 var cardPalette = func() color.Palette {

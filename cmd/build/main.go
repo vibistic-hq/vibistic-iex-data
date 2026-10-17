@@ -129,9 +129,16 @@ func writeImages(dir string, files map[string]*series.File, now time.Time) error
 		}()
 	}
 	for sym, f := range files {
-		if f.Coverage == "ok" {
-			syms <- sym
+		if f.Coverage != "ok" {
+			continue
 		}
+		// A file the app would refuse gets no image (its share page shows the
+		// generic card); a slip in our own output, so say which.
+		if err := og.Accepted(f); err != nil {
+			fmt.Fprintf(os.Stderr, "build: no preview image for %s: the app would reject its file: %v\n", sym, err)
+			continue
+		}
+		syms <- sym
 	}
 	close(syms)
 	wg.Wait()

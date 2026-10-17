@@ -28,15 +28,15 @@ type goldenCard struct {
 	Text      map[string]string `json:"text"`
 }
 
-func readGolden(t *testing.T) (time.Time, map[string]goldenCard) {
+func readGolden(t *testing.T) (time.Time, map[string]*goldenCard) {
 	t.Helper()
 	b, err := os.ReadFile("testdata/golden.json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var g struct {
-		Now   string                `json:"now"`
-		Cards map[string]goldenCard `json:"cards"`
+		Now   string                 `json:"now"`
+		Cards map[string]*goldenCard `json:"cards"`
 	}
 	if err := json.Unmarshal(b, &g); err != nil {
 		t.Fatal(err)
@@ -83,6 +83,13 @@ func TestCardsMatchTheAppsEngine(t *testing.T) {
 			t.Fatalf("%s: not in golden.json", f.Symbol)
 		}
 		c, err := NewCard(f, now)
+		if want == nil {
+			// The app refuses this file: no card, so no image.
+			if err == nil {
+				t.Errorf("%s: the app refuses this file but NewCard made a card", f.Symbol)
+			}
+			continue
+		}
 		if err != nil {
 			t.Fatal(err)
 		}
