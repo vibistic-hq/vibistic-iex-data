@@ -37,8 +37,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: scripts/fetch-archive.sh days
+      # A failing test, or a site over budget, stops here: the last deployment stays.
+      - name: Test
+        run: go test ./...
       - name: Build
         run: go run ./cmd/build -days days -reviewed splits-reviewed.json -out site
+      - name: Check size
+        run: scripts/check-site-size.sh site
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: site

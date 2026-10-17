@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/vibistic-hq/vibistic-iex-data/internal/day"
+	"github.com/vibistic-hq/vibistic-iex-data/internal/og"
 	"github.com/vibistic-hq/vibistic-iex-data/internal/series"
 	"github.com/vibistic-hq/vibistic-iex-data/internal/tops"
 )
@@ -49,8 +51,10 @@ func TestRunBuildsTheSite(t *testing.T) {
 	days := filepath.Join(tmp, "days")
 	os.Mkdir(days, 0o755)
 	aapl := tops.Summary{Symbol: "AAPL", Open: 100_0000, High: 101_0000, Low: 99_0000, Close: 100_5000, Volume: 10_000, Notional: 1_005_000, Trades: 10, LotTrades: 10}
-	writeDay(t, days, "2026-10-08", aapl)
-	writeDay(t, days, "2026-10-09", aapl)
+	// Odd lots only: no IEX price, so a sparse file and no preview image.
+	odd := tops.Summary{Symbol: "ODD", Volume: 50, Notional: 500, Trades: 5}
+	writeDay(t, days, "2026-10-08", aapl, odd)
+	writeDay(t, days, "2026-10-09", aapl, odd)
 	reviewed := filepath.Join(tmp, "reviewed.json")
 	os.WriteFile(reviewed, []byte("[]"), 0o644)
 	out := filepath.Join(tmp, "site")
@@ -75,6 +79,21 @@ func TestRunBuildsTheSite(t *testing.T) {
 	idx, _ := os.ReadFile(filepath.Join(out, "index.html"))
 	if !strings.Contains(string(idx), series.Citation) || !strings.Contains(string(idx), series.TermsURL) {
 		t.Fatal("index page lacks the citation")
+	}
+	// The preview image of the covered symbol only (vibistic-stocks share links).
+	pngBytes, err := os.ReadFile(filepath.Join(out, "v1", "og", "AAPL.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := png.DecodeConfig(bytes.NewReader(pngBytes))
+	if err != nil || cfg.Width != og.Width || cfg.Height != og.Height {
+		t.Fatalf("AAPL.png: %v %+v", err, cfg)
+	}
+	if _, err := os.Stat(filepath.Join(out, "v1", "og", "ODD.png")); !os.IsNotExist(err) {
+		t.Fatalf("a sparse symbol got an image: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(out, "v1", "s", "ODD.json")); err != nil {
+		t.Fatal(err)
 	}
 	if err := run(days, reviewed, out, time.Now()); err == nil {
 		t.Fatal("must refuse to overwrite an existing site")
