@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"regexp"
 	"sort"
 	"strconv"
@@ -11,8 +12,8 @@ import (
 )
 
 // Rows are kept for periods ending within this many days of the company's
-// newest period of that kind (a concept last filed years ago must not come
-// back as a recent row), and a company whose newest period ended more than
+// newest period (quarter or year): a series last filed years ago must not
+// come back as recent rows. A company whose newest period ended more than
 // staleDays before the snapshot gets no file (it stopped filing).
 const (
 	quarterWindow = 1280
@@ -62,12 +63,18 @@ type rec struct {
 
 type span struct{ start, end time.Time }
 
-func (s span) key() string { return s.start.Format("2006-01-02") + "/" + s.end.Format("2006-01-02") }
-
 // metric is one figure's facts by period.
 type metric struct {
-	codes    []string // in order of preference
+	revenue  bool
+	codes    []string // in order of preference among equal values
 	byPeriod map[span][]rec
+}
+
+// cand is one concept's value in a period's original filing(s).
+type cand struct {
+	code      string
+	r         *rec
+	ambiguous bool
 }
 
 // Extract reads one company's companyfacts JSON. It returns nil (no file)
@@ -79,17 +86,15 @@ func Extract(r io.Reader, symbol string, now time.Time) (*File, error) {
 			USGAAP map[string]json.RawMessage `json:"us-gaap"`
 		} `json:"facts"`
 	}
-	dec := json.NewDecoder(r)
-	dec.UseNumber()
-	if err := dec.Decode(&cf); err != nil {
+	if err := json.NewDecoder(r).Decode(&cf); err != nil {
 		return nil, err
 	}
 	cik, err := parseCIK(cf.CIK)
 	if err != nil {
 		return nil, err
 	}
-	rev := metric{codes: RevenueCodes, byPeriod: map[span][]rec{}}
-	ni := metric{codes: []string{"ni"}, byPeriod: map[span][]rec{}}
+	rev := &metric{revenue: true, codes: RevenueCodes, byPeriod: map[span][]rec{}}
+	ni := &metric{codes: []string{"ni"}, byPeriod: map[span][]rec{}}
 	for code, concept := range Concepts {
 		raw, ok := cf.Facts.USGAAP[concept]
 		if !ok {
@@ -101,20 +106,19 @@ func Extract(r io.Reader, symbol string, now time.Time) (*File, error) {
 		if err := json.Unmarshal(raw, &c); err != nil {
 			return nil, fmt.Errorf("%s: %w", concept, err)
 		}
-		m := &rev
+		m := rev
 		if code == "ni" {
-			m = &ni
+			m = ni
 		}
 		for _, f := range c.Units["USD"] {
 			if !forms[f.Form] || !accnRe.MatchString(f.Accn) || !finite(f.Val) {
 				continue
 			}
-			if _, err := parseDate(f.Filed); err != nil {
-				continue
-			}
+			filed, err0 := parseDate(f.Filed)
 			s, err1 := parseDate(f.Start)
 			e, err2 := parseDate(f.End)
-			if err1 != nil || err2 != nil || e.Before(s) {
+			// A period must be over by the time it is filed.
+			if err0 != nil || err1 != nil || err2 != nil || e.Before(s) || e.After(filed) {
 				continue
 			}
 			k := kindOf(days(s, e))
@@ -145,35 +149,31 @@ func Extract(r io.Reader, symbol string, now time.Time) (*File, error) {
 			p.NetIncome = v
 		}
 	}
-	for _, m := range []*metric{&rev, &ni} {
-		isRev := m == &rev
+	for _, m := range []*metric{rev, ni} {
 		for sp, recs := range m.byPeriod {
-			k := recs[0].kind
-			if k == kNine {
-				continue
+			if k := recs[0].kind; k != kNine {
+				put(sp, k, m.value(m.pick(m.original(sp))), m.revenue)
 			}
-			v, _ := m.original(sp)
-			put(sp, k, v, isRev)
 		}
 		for sp, v := range m.fourthQuarters() {
-			put(sp, kQuarter, v, isRev)
+			put(sp, kQuarter, v, m.revenue)
 		}
 	}
 	checkYears(quarters, years)
-	f := &File{V: 1, Source: "SEC", Symbol: symbol, CIK: cik, GeneratedAt: now.UTC().Format(time.RFC3339)}
-	f.Quarters = keep(quarters, quarterWindow, MaxQuarters)
-	f.Years = keep(years, yearWindow, MaxYears)
 	newest := time.Time{}
-	for _, ps := range [][]Period{f.Quarters, f.Years} {
-		if len(ps) > 0 {
-			if e, _ := parseDate(ps[len(ps)-1].End); e.After(newest) {
-				newest = e
+	for _, rows := range []map[span]*Period{quarters, years} {
+		for sp, p := range rows {
+			if (p.Revenue.Val != nil || p.NetIncome.Val != nil) && sp.end.After(newest) {
+				newest = sp.end
 			}
 		}
 	}
 	if newest.IsZero() || now.Sub(newest).Hours()/24 > staleDays {
 		return nil, nil
 	}
+	f := &File{V: 1, Source: "SEC", Symbol: symbol, CIK: cik, GeneratedAt: now.UTC().Format(time.RFC3339)}
+	f.Quarters = keep(quarters, newest.AddDate(0, 0, -quarterWindow), MaxQuarters)
+	f.Years = keep(years, newest.AddDate(0, 0, -yearWindow), MaxYears)
 	return f, nil
 }
 
@@ -194,59 +194,81 @@ func parseCIK(raw json.RawMessage) (int64, error) {
 
 var cikRe = regexp.MustCompile(`^[0-9]{1,10}$`)
 
-// original is a period's value as first reported: from the earliest filing
-// that has the period under any of the metric's concepts, the first concept
-// in order of preference that filing reports. The second result is that
-// value's record (nil when null).
-func (m *metric) original(sp span) (Value, *rec) {
-	recs := m.byPeriod[sp]
+// original lists, for a period, each concept's value in the earliest
+// filing(s) that report the period under any of the metric's concepts: the
+// period as first reported. Two different values of one concept on that day
+// make that concept ambiguous.
+func (m *metric) original(sp span) []cand {
 	first := ""
-	for _, r := range recs {
+	for _, r := range m.byPeriod[sp] {
 		if first == "" || r.filed < first {
 			first = r.filed
 		}
 	}
+	var out []cand
 	for _, code := range m.codes {
-		v, r, found := m.at(sp, first, code)
-		if found {
-			return v, r
+		var c *cand
+		for i := range m.byPeriod[sp] {
+			x := &m.byPeriod[sp][i]
+			if x.filed != first || x.code != code {
+				continue
+			}
+			switch {
+			case c == nil:
+				c = &cand{code: code, r: x}
+			case c.r.val != x.val:
+				c.ambiguous = true
+			case x.accn < c.r.accn:
+				// The same value in several filings that day: the lowest accession number.
+				c.r = x
+			}
+		}
+		if c != nil {
+			out = append(out, *c)
 		}
 	}
-	return Value{Why: "none"}, nil
+	return out
 }
 
-// at is the period's value under one concept in the filings of one day.
-// found is false when there is none; two different values make it ambiguous.
-func (m *metric) at(sp span, filed, code string) (v Value, r *rec, found bool) {
-	var pick *rec
-	for i := range m.byPeriod[sp] {
-		x := &m.byPeriod[sp][i]
-		if x.filed != filed || x.code != code {
-			continue
-		}
-		if pick != nil && pick.val != x.val {
-			return Value{Why: "ambiguous"}, nil, true
-		}
-		// Several filings on one day with the same value: the lowest accession number.
-		if pick == nil || x.accn < pick.accn {
-			pick = x
+// order sorts unambiguous candidates largest first (total revenue is the
+// largest top-line figure; some filers tag one line, not the total, as
+// Revenues), equal values by preference.
+func order(cs []cand) []cand {
+	out := append([]cand{}, cs...)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].r.val > out[j].r.val })
+	return out
+}
+
+// pick is the period's figure from its candidates: any ambiguity makes it
+// ambiguous, as one of the ambiguous values might be the total.
+func (m *metric) pick(cs []cand) (*cand, string) {
+	if len(cs) == 0 {
+		return nil, "none"
+	}
+	for _, c := range cs {
+		if c.ambiguous {
+			return nil, "ambiguous"
 		}
 	}
-	if pick == nil {
-		return Value{}, nil, false
+	c := order(cs)[0]
+	if m.revenue && c.r.val < 0 {
+		// A few filers report a negative revenue (returns, or a fund's
+		// losses under Revenues): not a revenue figure to show.
+		return nil, "negative"
 	}
-	val := pick.val
-	revenue := pick.code != "ni"
-	// A few filers report a negative revenue (returns or a fund's losses
-	// under Revenues): not a revenue figure to show.
-	if revenue && val < 0 {
-		return Value{Why: "negative"}, nil, true
+	return &c, ""
+}
+
+func (m *metric) value(c *cand, why string) Value {
+	if c == nil {
+		return Value{Why: why}
 	}
-	out := Value{Val: &val, C: pick.code, Form: pick.form, Filed: pick.filed, Accn: pick.accn}
-	if p, ok := m.prev(pick); ok && (!revenue || p >= 0) {
+	v := c.r.val
+	out := Value{Val: &v, C: c.code, Form: c.r.form, Filed: c.r.filed, Accn: c.r.accn}
+	if p, ok := m.prev(c.r); ok && (!m.revenue || p >= 0) {
 		out.Prev = &p
 	}
-	return out, pick, true
+	return out
 }
 
 // prev is the year-earlier period's value in the same filing under the same
@@ -275,15 +297,20 @@ func (m *metric) prev(r *rec) (float64, bool) {
 	return vals[0], true
 }
 
-// fourthQuarters derives each fiscal year's last quarter that no filing
-// reports by itself: the year minus the nine months that start with it,
-// each as first reported, under the first concept both filings report.
+// fourthQuarters gives each fiscal year's last quarter: the year minus the
+// nine months that start with it, both as first reported. A quarter filed by
+// itself is kept only if it agrees with that; a filed revenue equal to the
+// whole year (some filers tag the year's total with the quarter's dates) is
+// replaced by the computed one, or not shown when there is none.
 func (m *metric) fourthQuarters() map[span]Value {
 	out := map[span]Value{}
 	for y, yrecs := range m.byPeriod {
 		if yrecs[0].kind != kYear {
 			continue
 		}
+		yc := m.original(y)
+		yPick, _ := m.pick(yc)
+		checked := map[span]bool{}
 		for n, nrecs := range m.byPeriod {
 			if nrecs[0].kind != kNine || !n.start.Equal(y.start) {
 				continue
@@ -292,39 +319,76 @@ func (m *metric) fourthQuarters() map[span]Value {
 			if kindOf(days(q.start, q.end)) != kQuarter {
 				continue
 			}
-			if _, direct := m.byPeriod[q]; direct {
+			checked[q] = true
+			derived := m.derive(yc, m.original(n))
+			if _, direct := m.byPeriod[q]; !direct {
+				out[q] = derived
 				continue
 			}
-			yFirst, nFirst := firstFiled(yrecs), firstFiled(nrecs)
-			for _, code := range m.codes {
-				yv, yr, yok := m.at(y, yFirst, code)
-				nv, nr, nok := m.at(n, nFirst, code)
-				if !yok || !nok {
-					continue
-				}
-				if yv.Val == nil || nv.Val == nil {
-					out[q] = Value{Why: "ambiguous"}
-					break
-				}
-				val := *yv.Val - *nv.Val
-				if code != "ni" && val < 0 {
-					out[q] = Value{Why: "check"}
-					break
-				}
-				v := Value{Val: &val, C: code, Form: yr.form, Filed: yr.filed, Accn: yr.accn,
-					Derived: &Derived{Year: Source{yr.accn, yr.filed}, Nine: Source{nr.accn, nr.filed}}}
-				if yv.Prev != nil && nv.Prev != nil {
-					p := *yv.Prev - *nv.Prev
-					if code == "ni" || p >= 0 {
-						v.Prev = &p
-					}
-				}
-				out[q] = v
-				break
+			dv := m.value(m.pick(m.original(q)))
+			if dv.Val == nil || yPick == nil {
+				continue
+			}
+			tol := 0.005 * math.Abs(yPick.r.val)
+			switch {
+			case derived.Val != nil && math.Abs(*dv.Val-*derived.Val) <= tol:
+				// Agrees: the filed quarter stays.
+			case derived.Val != nil && m.revenue && math.Abs(*dv.Val-yPick.r.val) <= 0.001*math.Abs(yPick.r.val):
+				// The year's total under the quarter's dates: the computed quarter is the one.
+				out[q] = derived
+			default:
+				out[q] = Value{Why: "check"}
+			}
+		}
+		if !m.revenue || yPick == nil {
+			continue
+		}
+		for q, qrecs := range m.byPeriod {
+			if qrecs[0].kind != kQuarter || !q.end.Equal(y.end) || checked[q] {
+				continue
+			}
+			if dv := m.value(m.pick(m.original(q))); dv.Val != nil && math.Abs(*dv.Val-yPick.r.val) <= 0.001*math.Abs(yPick.r.val) {
+				out[q] = Value{Why: "check"}
 			}
 		}
 	}
 	return out
+}
+
+// derive is year minus nine months under the first concept, largest year
+// value first, that both report.
+func (m *metric) derive(yc, nc []cand) Value {
+	for _, c := range append(append([]cand{}, yc...), nc...) {
+		if c.ambiguous {
+			return Value{Why: "ambiguous"}
+		}
+	}
+	for _, y := range order(yc) {
+		for _, n := range nc {
+			if n.code != y.code {
+				continue
+			}
+			// The nine months as filed before the year (in a 10-Q of that
+			// year), not a comparative in a later 10-Q on a newer basis.
+			if n.r.filed > y.r.filed {
+				return Value{Why: "none"}
+			}
+			val := y.r.val - n.r.val
+			if m.revenue && (val < 0 || val > y.r.val*1.001) {
+				return Value{Why: "check"}
+			}
+			v := Value{Val: &val, C: y.code, Form: y.r.form, Filed: y.r.filed, Accn: y.r.accn,
+				Derived: &Derived{Year: Source{y.r.accn, y.r.filed}, Nine: Source{n.r.accn, n.r.filed}}}
+			yp, ok1 := m.prev(y.r)
+			np, ok2 := m.prev(n.r)
+			if ok1 && ok2 && (!m.revenue || yp-np >= 0) {
+				p := yp - np
+				v.Prev = &p
+			}
+			return v
+		}
+	}
+	return Value{Why: "none"}
 }
 
 // checkYears drops a year's revenue that is smaller than one of its own
@@ -355,23 +419,13 @@ func checkYears(quarters, years map[span]*Period) {
 	}
 }
 
-func firstFiled(recs []rec) string {
-	first := ""
-	for _, r := range recs {
-		if first == "" || r.filed < first {
-			first = r.filed
-		}
-	}
-	return first
-}
-
-// keep returns the rows with a value, recent for the company, newest max,
-// oldest first, without overlaps (the later-ending of two overlapping rows
-// stays).
-func keep(rows map[span]*Period, window, max int) []Period {
+// keep returns the rows with a value ending on or after `since`, the newest
+// max, oldest first, without overlaps (the later-ending of two overlapping
+// rows stays).
+func keep(rows map[span]*Period, since time.Time, max int) []Period {
 	var list []Period
-	for _, p := range rows {
-		if p.Revenue.Val != nil || p.NetIncome.Val != nil {
+	for sp, p := range rows {
+		if (p.Revenue.Val != nil || p.NetIncome.Val != nil) && !sp.end.Before(since) {
 			list = append(list, *p)
 		}
 	}
@@ -382,19 +436,9 @@ func keep(rows map[span]*Period, window, max int) []Period {
 		return list[i].Start > list[j].Start
 	})
 	out := []Period{} // [] in the file, never null
-	var newest time.Time
 	for _, p := range list {
-		e, _ := parseDate(p.End)
-		if newest.IsZero() {
-			newest = e
-		}
-		if int(newest.Sub(e).Hours()/24) > window {
-			break
-		}
-		if len(out) > 0 {
-			if prevStart, _ := parseDate(out[len(out)-1].Start); !e.Before(prevStart) {
-				continue
-			}
+		if len(out) > 0 && p.End >= out[len(out)-1].Start {
+			continue
 		}
 		out = append(out, p)
 		if len(out) == max {

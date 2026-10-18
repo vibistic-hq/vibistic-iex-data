@@ -77,9 +77,11 @@ var RevenueCodes = []string{"rev", "rfc", "rfci", "srn", "rnie"}
 const (
 	MaxQuarters = 12
 	MaxYears    = 5
-	// Bounds of a period's length in days, both ends counted.
-	quarterMin, quarterMax = 85, 99
-	nineMin, nineMax       = 266, 280
+	// Bounds of a period's length in days, both ends counted: quarters of
+	// 12 to 17 weeks (Costco's 12-week quarters, Kroger's 16-week first
+	// quarter), nine months of 36 to 41 weeks, years of 52 or 53 weeks.
+	quarterMin, quarterMax = 83, 120
+	nineMin, nineMax       = 250, 288
 	yearMin, yearMax       = 358, 372
 	maxAbs                 = 1e13 // dollars; the largest companies' revenue is under 1e12
 )
@@ -126,7 +128,8 @@ func Validate(f *File) error {
 	for _, list := range []struct {
 		ps       []Period
 		min, max int
-	}{{f.Quarters, quarterMin, quarterMax}, {f.Years, yearMin, yearMax}} {
+		year     bool
+	}{{f.Quarters, quarterMin, quarterMax, false}, {f.Years, yearMin, yearMax, true}} {
 		var prevEnd time.Time
 		for i, p := range list.ps {
 			s, err := parseDate(p.Start)
@@ -144,10 +147,10 @@ func Validate(f *File) error {
 				return fmt.Errorf("period %s..%s overlaps or is out of order", p.Start, p.End)
 			}
 			prevEnd = e
-			if err := validateValue(p.Revenue, true, gen); err != nil {
+			if err := validateValue(p.Revenue, true, list.year, e, gen); err != nil {
 				return fmt.Errorf("%s revenue: %w", p.End, err)
 			}
-			if err := validateValue(p.NetIncome, false, gen); err != nil {
+			if err := validateValue(p.NetIncome, false, list.year, e, gen); err != nil {
 				return fmt.Errorf("%s net income: %w", p.End, err)
 			}
 			if p.Revenue.Val == nil && p.NetIncome.Val == nil {
@@ -160,7 +163,10 @@ func Validate(f *File) error {
 
 func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) && math.Abs(v) <= maxAbs }
 
-func validateValue(v Value, revenue bool, gen time.Time) error {
+// validateValue checks one figure of a period ending on `end`: a year's
+// comes from an annual report and is never derived, a derived quarter's year
+// is an annual report, and no period ends after the filing that reports it.
+func validateValue(v Value, revenue, year bool, end, gen time.Time) error {
 	if v.Val == nil {
 		if !whys[v.Why] || v.Prev != nil || v.C != "" || v.Form != "" || v.Filed != "" || v.Accn != "" || v.Derived != nil {
 			return fmt.Errorf("null value with fields or bad reason %q", v.Why)
@@ -185,6 +191,16 @@ func validateValue(v Value, revenue bool, gen time.Time) error {
 	if err := validateFiled(v.Filed, gen); err != nil {
 		return err
 	}
+	if filed, _ := parseDate(v.Filed); end.After(filed) {
+		return fmt.Errorf("period ends after its filing %s", v.Filed)
+	}
+	annual := v.Form == "10-K" || v.Form == "10-KT"
+	if year && (!annual || v.Derived != nil) {
+		return fmt.Errorf("a year from %s (derived %v)", v.Form, v.Derived != nil)
+	}
+	if v.Derived != nil && !annual {
+		return fmt.Errorf("derived quarter from %s", v.Form)
+	}
 	if d := v.Derived; d != nil {
 		for _, s := range []Source{d.Year, d.Nine} {
 			if !accnRe.MatchString(s.Accn) {
@@ -194,8 +210,8 @@ func validateValue(v Value, revenue bool, gen time.Time) error {
 				return err
 			}
 		}
-		if d.Year.Accn != v.Accn || d.Year.Filed != v.Filed {
-			return fmt.Errorf("derived: year filing differs from the value's")
+		if d.Year.Accn != v.Accn || d.Year.Filed != v.Filed || d.Nine.Filed > d.Year.Filed {
+			return fmt.Errorf("derived: filings out of place")
 		}
 	}
 	return nil

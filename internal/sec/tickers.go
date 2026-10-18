@@ -32,7 +32,7 @@ func ValidateClasses(cs []Class) error {
 // products) have no business revenue; their "net income" is the change in
 // the value of what they hold. Matched on the name SEC lists, which is used
 // for nothing else and never published.
-var fundRe = regexp.MustCompile(`(?i)\b(ETF|ETFs|Fund|Funds|Fund,? LP|Trust II|Commodity|ProShares|iShares|SPDR|Invesco DB|Grayscale|Teucrium)\b|\b(Bitcoin|Ether|Ethereum|Solana|XRP|Dogecoin|Litecoin|Avalanche|Chainlink|Stellar|Sui|Bittensor|Horizen|Zcash|Crypto|Gold|Silver|Platinum|Palladium|Precious Metals)\b.*\b(Trust|ETF)\b`)
+var fundRe = regexp.MustCompile(`(?i)\b(ETF|ETFs|Fund|Funds|Trust II|Commodity|ProShares|iShares|SPDR|Invesco DB|Grayscale|Teucrium|CurrencyShares|VS Trust|Holdings Trust)\b|\b(Bitcoin|Ether|Ethereum|Solana|XRP|Dogecoin|Litecoin|Avalanche|Chainlink|Stellar|Sui|Bittensor|Horizen|Zcash|Crypto|Gold|Silver|Platinum|Palladium|Precious Metals)\b.*\b(Trust|ETF)\b`)
 
 // Tickers reads SEC's company_tickers_exchange.json ({"fields": [...],
 // "data": [[cik, name, ticker, exchange], ...]}) into the app's symbols and
@@ -76,12 +76,14 @@ func Tickers(r io.Reader, reviewed []Class) (map[string]int64, error) {
 		}
 		json.Unmarshal(row[1], &name) // a missing name only means no fund check
 		sym := strings.ReplaceAll(strings.ToUpper(ticker), "-", ".")
+		if !symbolRe.MatchString(sym) || instrument(sym) || fundRe.MatchString(name) {
+			continue
+		}
+		// The company's first ticker that is not a warrant, unit or right
+		// (SEC lists BEATW before BEAT), or a reviewed class.
 		primary := !first[cik]
 		first[cik] = true
 		if !primary && extra[sym] != cik {
-			continue
-		}
-		if !symbolRe.MatchString(sym) || instrument(sym) || fundRe.MatchString(name) {
 			continue
 		}
 		if prev, ok := out[sym]; ok && prev != cik {

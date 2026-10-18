@@ -2,6 +2,7 @@ package sec
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"strings"
 	"testing"
@@ -74,6 +75,18 @@ func TestRealCompanies(t *testing.T) {
 		{"JPM", "q", "2026-06-30", 57347e6, 21155e6, "rnie", false},
 		// Alphabet Q1 2025: as first filed (contract revenue, 2025-04-25), not a later comparative.
 		{"GOOGL", "q", "2025-03-31", 90234e6, 34540e6, "rfc", false},
+		// BlackRock tags a smaller line as Revenues: the total is the larger contract revenue.
+		{"BLK", "y", "2024-12-31", 20407e6, 6369e6, "rfc", false},
+		// Better: net revenue, larger than what it tags as Revenues.
+		{"BETR", "y", "2024-12-31", 108488e3, -206301e3, "rnie", false},
+		// HF Sinclair and NiSource tag the year's total with Q4's dates: the computed Q4 instead.
+		{"DINO", "q", "2024-12-31", 6500e6, -213.5e6, "rfc", true},
+		{"NI", "q", "2025-12-31", 1887e6, 257.8e6, "rfc", true},
+		// Costco: 12-week quarters, a 16-week fourth quarter.
+		{"COST", "q", "2026-05-10", 70530e6, 2192e6, "rfc", false},
+		{"COST", "q", "2026-08-30", 95720e6, 2998e6, "rfc", true},
+		// Kroger: a 16-week first quarter.
+		{"KR", "q", "2026-05-23", 46120e6, 903e6, "rfc", false},
 	}
 	for _, c := range cases {
 		f := extractFile(t, c.name)
@@ -82,10 +95,12 @@ func TestRealCompanies(t *testing.T) {
 			ps = f.Years
 		}
 		p := period(t, ps, c.end)
-		if got := val(t, p.Revenue); got != c.revenue {
+		// Exact, or to the rounding the expected figure is written with (4 significant digits).
+		near := func(got, want float64) bool { return got == want || math.Abs(got-want) <= math.Abs(want)*5e-4 }
+		if got := val(t, p.Revenue); !near(got, c.revenue) {
 			t.Errorf("%s %s revenue %v, want %v", c.name, c.end, got, c.revenue)
 		}
-		if got := val(t, p.NetIncome); got != c.net {
+		if got := val(t, p.NetIncome); !near(got, c.net) {
 			t.Errorf("%s %s net income %v, want %v", c.name, c.end, got, c.net)
 		}
 		if p.Revenue.C != c.c || (p.Revenue.Derived != nil) != c.derived {
@@ -110,6 +125,14 @@ func TestRealCompanies(t *testing.T) {
 	f := extractFile(t, "NVDA")
 	if len(f.Quarters) != MaxQuarters || len(f.Years) != MaxYears {
 		t.Errorf("NVDA: %d quarters, %d years", len(f.Quarters), len(f.Years))
+	}
+	// Costco's 2010-era quarters (with the old 85-99 day rule the only "quarters"
+	// left) never come back: rows stay within the company's newest period's window.
+	for _, n := range []string{"COST", "KR"} {
+		f := extractFile(t, n)
+		if len(f.Quarters) != MaxQuarters || f.Quarters[0].End < "2023-01-01" {
+			t.Errorf("%s quarters %d from %s", n, len(f.Quarters), f.Quarters[0].End)
+		}
 	}
 }
 
@@ -208,6 +231,12 @@ func TestFourthQuarter(t *testing.T) {
 	if r := period(t, extract(t, facts(mixed...)).Quarters, "2025-12-31").Revenue; r.Val != nil {
 		t.Errorf("mixed concepts: %+v", r)
 	}
+	// Nine months first reported after the year (a later 10-Q's comparative): no Q4.
+	late := append([]string{}, base[2:]...)
+	late = append(late, "Revenues 2025-01-01 2025-09-30 300 2026-11-01 10-Q 0000000001-26-000009")
+	if r := period(t, extract(t, facts(late...)).Quarters, "2025-12-31").Revenue; r.Val != nil {
+		t.Errorf("late nine months: %+v", r)
+	}
 	// Nine months not starting with the year: no Q4.
 	off := append([]string{}, base[2:4]...)
 	off = append(off, "Revenues 2025-02-01 2025-10-31 300 2025-11-20 10-Q 0000000001-25-000004")
@@ -291,14 +320,17 @@ func TestTickers(t *testing.T) {
 		[10,"SPDR GOLD TRUST","GLD","NYSE"],[11,"ProShares Trust II","UVXY","NYSE"],[12,"United States Oil Fund, LP","USO","NYSE"],
 		[13,"iShares Bitcoin Trust ETF","IBIT","Nasdaq"],[14,"American Bitcoin Corp.","ABTC","Nasdaq"],
 		[15,"U S PHYSICAL THERAPY INC /NV","USPH","NYSE"],[16,"Redwood Trust Inc","RWT","NYSE"],
-		[17,"Old Co","GOOG","NYSE"]]}`
+		[17,"Old Co","GOOG","NYSE"],[18,"Beat Co","BEATW","Nasdaq"],[18,"Beat Co","BEAT","Nasdaq"],
+		[19,"Franklin Templeton Digital Holdings Trust","EZBC","Cboe"],[20,"VS Trust","UVIX","Cboe"],
+		[21,"Invesco CurrencyShares Euro Trust","FXE","NYSE"]]}`
 	reviewed := []Class{{"BRK.A", 4}, {"GOOG", 3}}
 	m, err := Tickers(strings.NewReader(doc), reviewed)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// GOOG is reviewed for CIK 3, but also listed by another company: dropped as ambiguous.
-	want := map[string]int64{"GOOGL": 3, "BRK.B": 4, "BRK.A": 4, "BHF": 5, "ABTC": 14, "USPH": 15, "RWT": 16}
+	// BEAT: the first ticker that is not a warrant, though SEC lists BEATW first.
+	want := map[string]int64{"GOOGL": 3, "BRK.B": 4, "BRK.A": 4, "BHF": 5, "ABTC": 14, "USPH": 15, "RWT": 16, "BEAT": 18}
 	if len(m) != len(want) {
 		t.Errorf("got %v", m)
 	}
@@ -357,21 +389,44 @@ func TestYearSmallerThanAQuarter(t *testing.T) {
 func TestValidateRejects(t *testing.T) {
 	good := func() *File { return extractFile(t, "NET") }
 	for name, spoil := range map[string]func(f *File){
-		"source":      func(f *File) { f.Source = "IEX" },
-		"symbol":      func(f *File) { f.Symbol = "net" },
-		"cik":         func(f *File) { f.CIK = 0 },
-		"generated":   func(f *File) { f.GeneratedAt = "yesterday" },
-		"order":       func(f *File) { f.Quarters[0], f.Quarters[1] = f.Quarters[1], f.Quarters[0] },
-		"length":      func(f *File) { f.Quarters[0].Start = "2023-01-01" },
-		"date":        func(f *File) { f.Quarters[0].End = "2023-02-30" },
-		"negative":    func(f *File) { v := -1.0; f.Quarters[0].Revenue.Val = &v },
-		"concept":     func(f *File) { f.Quarters[0].Revenue.C = "ni" },
-		"form":        func(f *File) { f.Quarters[0].Revenue.Form = "8-K" },
-		"accn":        func(f *File) { f.Quarters[0].Revenue.Accn = "x" },
-		"future":      func(f *File) { f.Quarters[0].Revenue.Filed = "2027-01-01" },
-		"null+fields": func(f *File) { f.Quarters[0].Revenue = Value{Why: "none", C: "rev"} },
-		"reason":      func(f *File) { f.Quarters[0].Revenue = Value{Why: "because"} },
-		"too many":    func(f *File) { f.Years = append(f.Years, f.Years...) },
+		"source":         func(f *File) { f.Source = "IEX" },
+		"symbol":         func(f *File) { f.Symbol = "net" },
+		"cik":            func(f *File) { f.CIK = 0 },
+		"generated":      func(f *File) { f.GeneratedAt = "yesterday" },
+		"order":          func(f *File) { f.Quarters[0], f.Quarters[1] = f.Quarters[1], f.Quarters[0] },
+		"length":         func(f *File) { f.Quarters[0].Start = "2023-01-01" },
+		"date":           func(f *File) { f.Quarters[0].End = "2023-02-30" },
+		"negative":       func(f *File) { v := -1.0; f.Quarters[0].Revenue.Val = &v },
+		"concept":        func(f *File) { f.Quarters[0].Revenue.C = "ni" },
+		"form":           func(f *File) { f.Quarters[0].Revenue.Form = "8-K" },
+		"accn":           func(f *File) { f.Quarters[0].Revenue.Accn = "x" },
+		"future":         func(f *File) { f.Quarters[0].Revenue.Filed = "2027-01-01" },
+		"null+fields":    func(f *File) { f.Quarters[0].Revenue = Value{Why: "none", C: "rev"} },
+		"reason":         func(f *File) { f.Quarters[0].Revenue = Value{Why: "because"} },
+		"too many":       func(f *File) { f.Years = append(f.Years, f.Years...) },
+		"year from 10-Q": func(f *File) { f.Years[0].Revenue.Form = "10-Q" },
+		"derived year": func(f *File) {
+			r := &f.Years[0].Revenue
+			r.Derived = &Derived{Year: Source{r.Accn, r.Filed}, Nine: Source{r.Accn, r.Filed}}
+		},
+		"derived from 10-Q": func(f *File) {
+			for i := range f.Quarters {
+				if r := &f.Quarters[i].Revenue; r.Derived != nil {
+					r.Form = "10-Q"
+					return
+				}
+			}
+			panic("no derived quarter")
+		},
+		"ends after filing": func(f *File) { f.Quarters[0].Revenue.Filed = f.Quarters[0].Start },
+		"nine after year": func(f *File) {
+			for i := range f.Quarters {
+				if r := &f.Quarters[i].Revenue; r.Derived != nil {
+					r.Derived.Nine.Filed = "2026-10-01"
+					return
+				}
+			}
+		},
 	} {
 		f := good()
 		spoil(f)

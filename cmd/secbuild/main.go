@@ -83,6 +83,15 @@ func run(factsPath, tickersPath, reviewedPath, out string, now time.Time) error 
 		return err
 	}
 
+	// Two entries for one company: neither is used (which one is right
+	// cannot be told).
+	count := map[int64]int{}
+	for _, e := range zr.File {
+		if m := entryRe.FindStringSubmatch(e.Name); m != nil {
+			cik, _ := strconv.ParseInt(m[1], 10, 64)
+			count[cik]++
+		}
+	}
 	entries := make(chan *zip.File)
 	var mu sync.Mutex
 	files := map[string]*sec.File{}
@@ -118,9 +127,11 @@ func run(factsPath, tickersPath, reviewedPath, out string, now time.Time) error 
 		if len(byCIK[cik]) == 0 {
 			continue
 		}
-		if e.UncompressedSize64 > maxEntry {
-			fmt.Fprintf(os.Stderr, "secbuild: %s: %d bytes, skipped\n", e.Name, e.UncompressedSize64)
+		if count[cik] > 1 || e.UncompressedSize64 > maxEntry {
+			fmt.Fprintf(os.Stderr, "secbuild: %s: %d entries for the company or %d bytes, skipped\n", e.Name, count[cik], e.UncompressedSize64)
+			mu.Lock()
 			skipped++
+			mu.Unlock()
 			continue
 		}
 		entries <- e
@@ -150,8 +161,17 @@ func readEntry(e *zip.File, symbols []string, cik int64, now time.Time) ([]*sec.
 	if err != nil {
 		return nil, err
 	}
-	defer rc.Close()
-	f, err := sec.Extract(io.LimitReader(rc, maxEntry), symbols[0], now)
+	// Read to the end, so the zip reader checks the entry's checksum before
+	// any number from it is used.
+	b, err := io.ReadAll(io.LimitReader(rc, maxEntry+1))
+	rc.Close()
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxEntry {
+		return nil, fmt.Errorf("over %d bytes", maxEntry)
+	}
+	f, err := sec.Extract(bytes.NewReader(b), symbols[0], now)
 	if err != nil || f == nil {
 		return nil, err
 	}

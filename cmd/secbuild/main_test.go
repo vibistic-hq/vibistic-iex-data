@@ -77,6 +77,58 @@ func TestSecbuild(t *testing.T) {
 	}
 }
 
+// zipOf writes a zip of the given entries (name, content, stored or deflated).
+func zipOf(t *testing.T, entries [][2]string, store bool) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "facts.zip")
+	zf, _ := os.Create(p)
+	zw := zip.NewWriter(zf)
+	for _, e := range entries {
+		h := &zip.FileHeader{Name: e[0], Method: zip.Deflate}
+		if store {
+			h.Method = zip.Store
+		}
+		w, _ := zw.CreateHeader(h)
+		w.Write([]byte(e[1]))
+	}
+	zw.Close()
+	zf.Close()
+	return p
+}
+
+func TestSecbuildRejectsDuplicateAndCorruptEntries(t *testing.T) {
+	defer func(n int, m []string) { minFiles, mustHave = n, m }(minFiles, mustHave)
+	minFiles, mustHave = 1, []string{"AAPL"}
+	_, tpath, rpath := fixture(t)
+	aapl, _ := os.ReadFile("../../internal/sec/testdata/AAPL.json")
+	nvda, _ := os.ReadFile("../../internal/sec/testdata/NVDA.json")
+	// Two entries for Nvidia: neither is used.
+	z := zipOf(t, [][2]string{{"CIK0000320193.json", string(aapl)}, {"CIK0001045810.json", string(nvda)}, {"CIK0001045810.json", string(nvda)}}, false)
+	out := filepath.Join(t.TempDir(), "sec")
+	if err := run(z, tpath, rpath, out, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(out, "NVDA.json")); !os.IsNotExist(err) {
+		t.Error("a duplicated company was published")
+	}
+	// A stored entry changed after its checksum was written: the company is skipped.
+	z = zipOf(t, [][2]string{{"CIK0000320193.json", string(aapl)}, {"CIK0001045810.json", string(nvda)}}, true)
+	b, _ := os.ReadFile(z)
+	i := strings.Index(string(b), `"val":96221000000`)
+	if i < 0 {
+		t.Fatal("value not found")
+	}
+	b[i+7] = '9'
+	os.WriteFile(z, b, 0o644)
+	out = filepath.Join(t.TempDir(), "sec")
+	if err := run(z, tpath, rpath, out, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(out, "NVDA.json")); !os.IsNotExist(err) {
+		t.Error("an entry with a bad checksum was published")
+	}
+}
+
 func TestSecbuildReviewedFile(t *testing.T) {
 	zpath, tpath, _ := fixture(t)
 	bad := filepath.Join(t.TempDir(), "reviewed.json")
