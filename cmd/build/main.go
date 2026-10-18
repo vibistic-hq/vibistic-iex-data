@@ -1,9 +1,10 @@
 // Command build turns the archive of day files into the published site:
 // v1/s/{SYMBOL}.json for every symbol, v1/og/{SYMBOL}.png (the preview image
 // of Vibistic Stocks share links) for every covered symbol, v1/manifest.json
-// and an index page.
+// and an index page. With -sec, it also publishes a checked SEC snapshot
+// (cmd/secbuild) as v1/sec/{SYMBOL}.json (issue #8).
 //
-//	build -days days/ -reviewed splits-reviewed.json -out site/
+//	build -days days/ -reviewed splits-reviewed.json [-sec sec/] -out site/
 package main
 
 import (
@@ -24,6 +25,7 @@ import (
 
 	"github.com/vibistic-hq/vibistic-iex-data/internal/day"
 	"github.com/vibistic-hq/vibistic-iex-data/internal/og"
+	"github.com/vibistic-hq/vibistic-iex-data/internal/sec"
 	"github.com/vibistic-hq/vibistic-iex-data/internal/series"
 )
 
@@ -31,6 +33,7 @@ func main() {
 	daysDir := flag.String("days", "days", "directory of YYYYMMDD.jsonl.gz day files")
 	reviewed := flag.String("reviewed", "splits-reviewed.json", "reviewed splits and breaks")
 	out := flag.String("out", "site", "output directory (created; must not exist)")
+	secDir := flag.String("sec", "", "SEC snapshot directory from secbuild (optional)")
 	validate := flag.Bool("validate", false, "only check the reviewed file")
 	flag.Parse()
 	if *validate {
@@ -40,13 +43,13 @@ func main() {
 		}
 		return
 	}
-	if err := run(*daysDir, *reviewed, *out, time.Now()); err != nil {
+	if err := run(*daysDir, *reviewed, *secDir, *out, time.Now()); err != nil {
 		fmt.Fprintln(os.Stderr, "build:", err)
 		os.Exit(1)
 	}
 }
 
-func run(daysDir, reviewedPath, out string, now time.Time) error {
+func run(daysDir, reviewedPath, secDir, out string, now time.Time) error {
 	reviews, err := readReviews(reviewedPath)
 	if err != nil {
 		return err
@@ -94,6 +97,17 @@ func run(daysDir, reviewedPath, out string, now time.Time) error {
 	}
 	asOf := days[len(days)-1].Date
 	manifest := map[string]any{"v": 1, "source": "IEX", "citation": series.Citation, "termsUrl": series.TermsURL, "asOf": asOf, "generatedAt": now.UTC().Format(time.RFC3339), "sessions": len(days), "symbols": len(files), "covered": ok}
+	// The IEX files never wait on SEC's: a missing, stale or bad snapshot is
+	// left out (the app then says SEC figures are unavailable).
+	if secDir != "" {
+		info, err := copySEC(secDir, filepath.Join(out, "v1", "sec"), now)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "build: SEC snapshot left out: %v\n", err)
+			os.RemoveAll(filepath.Join(out, "v1", "sec"))
+		} else {
+			manifest["sec"] = info
+		}
+	}
 	if err := writeJSON(filepath.Join(out, "v1", "manifest.json"), manifest); err != nil {
 		return err
 	}
@@ -165,6 +179,77 @@ func writeImage(dir string, f *series.File, now time.Time) error {
 	return os.WriteFile(filepath.Join(dir, f.Symbol+".png"), b, 0o644)
 }
 
+// A snapshot older than this is not published: a company's ticker could
+// have passed to another company since.
+const secMaxAge = 10 * 24 * time.Hour
+
+// copySEC checks every file of a secbuild snapshot again (strict decoding,
+// sec.Validate, the symbol matching the file name) and copies them all, or
+// none.
+func copySEC(dir, dst string, now time.Time) (map[string]any, error) {
+	var snap struct {
+		V           int    `json:"v"`
+		Source      string `json:"source"`
+		GeneratedAt string `json:"generatedAt"`
+		Files       int    `json:"files"`
+	}
+	if err := decodeStrict(filepath.Join(dir, "snapshot.json"), &snap); err != nil {
+		return nil, err
+	}
+	gen, err := time.Parse(time.RFC3339, snap.GeneratedAt)
+	if err != nil || snap.V != 1 || snap.Source != "SEC" {
+		return nil, fmt.Errorf("snapshot.json: bad header")
+	}
+	if age := now.Sub(gen); age > secMaxAge || age < -time.Hour {
+		return nil, fmt.Errorf("snapshot from %s is too old or in the future", snap.GeneratedAt)
+	}
+	paths, err := filepath.Glob(filepath.Join(dir, "*.json"))
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return nil, err
+	}
+	n := 0
+	for _, p := range paths {
+		name := filepath.Base(p)
+		if name == "snapshot.json" {
+			continue
+		}
+		var f sec.File
+		if err := decodeStrict(p, &f); err != nil {
+			return nil, err
+		}
+		if err := sec.Validate(&f); err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		if f.Symbol+".json" != name || f.GeneratedAt != snap.GeneratedAt {
+			return nil, fmt.Errorf("%s: symbol %s, generated %s", name, f.Symbol, f.GeneratedAt)
+		}
+		if err := writeJSON(filepath.Join(dst, name), &f); err != nil {
+			return nil, err
+		}
+		n++
+	}
+	if n != snap.Files || n == 0 {
+		return nil, fmt.Errorf("%d files, snapshot.json says %d", n, snap.Files)
+	}
+	return map[string]any{"source": "SEC", "generatedAt": snap.GeneratedAt, "files": n}, nil
+}
+
+func decodeStrict(path string, v any) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	dec := json.NewDecoder(strings.NewReader(string(b)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return fmt.Errorf("%s: %w", filepath.Base(path), err)
+	}
+	return nil
+}
+
 func readReviews(path string) ([]series.Review, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -225,7 +310,7 @@ func indexPage(asOf string, symbols, covered int) string {
 <p>Daily bars built from IEX trades, for <a href="https://stocks.vibistic.com/">Vibistic Stocks</a>. Data as of the close of ` + e(asOf) + `: ` + fmt.Sprint(symbols) + ` symbols, ` + fmt.Sprint(covered) + ` with enough IEX trading to show numbers.</p>
 <p>` + e(series.Citation) + ` <a href="` + e(series.TermsURL) + `">IEX Historical Data Terms of Use</a>.</p>
 <p>The data reflects trading on IEX only, not other markets, and is a reference point only, not a basis for trading decisions. Not investment advice.</p>
-<p>Files: <code>v1/manifest.json</code>, <code>v1/s/{SYMBOL}.json</code> and, for symbols with enough IEX trading, <code>v1/og/{SYMBOL}.png</code> (the preview image of a Vibistic Stocks share link). How they are made: <a href="https://github.com/vibistic-hq/vibistic-iex-data">github.com/vibistic-hq/vibistic-iex-data</a>.</p>
+<p>Files: <code>v1/manifest.json</code>, <code>v1/s/{SYMBOL}.json</code> and, for symbols with enough IEX trading, <code>v1/og/{SYMBOL}.png</code> (the preview image of a Vibistic Stocks share link), and <code>v1/sec/{SYMBOL}.json</code> (revenue and net income from the company's SEC filings, as first reported). How they are made: <a href="https://github.com/vibistic-hq/vibistic-iex-data">github.com/vibistic-hq/vibistic-iex-data</a>.</p>
 </body></html>
 `
 }

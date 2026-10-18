@@ -1,7 +1,8 @@
 name: Publish
 
-# Rebuilds every symbol file from the archived days and deploys GitHub Pages.
-# Called by the nightly and backfill runs; can also be run by hand.
+# Rebuilds every symbol file from the archived days, adds the newest SEC
+# snapshot (when there is a good one) and deploys GitHub Pages. Called by the
+# nightly, backfill and SEC runs; can also be run by hand.
 on:
   workflow_call:
   workflow_dispatch:
@@ -37,11 +38,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: scripts/fetch-archive.sh days
+      # Never stops the IEX publish: no snapshot, or a bad one, only leaves v1/sec out.
+      - name: Fetch the SEC snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/fetch-sec-snapshot.sh sec || echo "::warning::SEC snapshot not fetched"
       # A failing test, or a site over budget, stops here: the last deployment stays.
       - name: Test
         run: go test ./...
       - name: Build
-        run: go run ./cmd/build -days days -reviewed splits-reviewed.json -out site
+        run: go run ./cmd/build -days days -reviewed splits-reviewed.json $( [ -f sec/snapshot.json ] && echo "-sec sec" ) -out site
       - name: Check size
         run: scripts/check-site-size.sh site
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
