@@ -49,7 +49,6 @@ Built once a day by `sec.yml` (`cmd/secbuild`, `internal/sec`) from SEC's bulk [
   - a computed fourth quarter needs nine months the company did not restate later (shown again more than 1% off in the year's 10-K or the next year's third-quarter 10-Q: the year may be on the new basis);
   - a computed fourth quarter's `prev` (from two filings) is kept only when it matches that quarter as first reported a year before;
   - net income is compared with the same period in the next year's filing too: more than 25% (and $1 million) off, it is not shown;
-  - a third quarter is not shown when the first three quarters do not add up to the nine months (a tag carried over with the wrong dates);
   - nine months revised in the year's 10-K count as restated.
   These catch inconsistent tags, not a tag that is wrong the same way in every filing (Kinetik tagged adjusted EBITDA as net income in 2023 and 2024): figures are as the companies tagged them.
   A negative reported revenue is null (`why: "negative"`).

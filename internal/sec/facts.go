@@ -194,8 +194,6 @@ func Extract(r io.Reader, symbol string, now time.Time) (*File, error) {
 	checkLaterNetIncome(ni, quarters)
 	checkLaterNetIncome(ni, years)
 	checkYears(quarters, years)
-	checkThirdQuarters(rev, quarters)
-	checkThirdQuarters(ni, quarters)
 	checkDerivedPrev(quarters)
 	// A scaling slip in the periods shown means the company's revenue tags
 	// cannot be trusted: none of its revenue is shown.
@@ -666,33 +664,6 @@ func checkLaterNetIncome(ni *metric, rows map[span]*Period) {
 	}
 	for _, p := range bad {
 		p.NetIncome = Value{Why: "check"}
-	}
-}
-
-// checkThirdQuarters drops a third quarter when the first three quarters do
-// not add up to the nine months (each as first reported, within 1% and $1
-// million): a tag carried over with the wrong dates (AEP's third quarters
-// held its second quarters' net income). Equal quarters alone prove nothing:
-// figures are rounded, and Molina earned $301 million in two quarters running.
-func checkThirdQuarters(m *metric, quarters map[span]*Period) {
-	for n, recs := range m.byPeriod {
-		if recs[0].kind != kNine {
-			continue
-		}
-		nine, _ := m.pick(m.original(n))
-		sum, ok := m.firstThree(n)
-		if nine == nil || !ok || math.Abs(nine.r.val-sum) <= 0.01*math.Max(math.Abs(nine.r.val), math.Abs(sum))+1e6 {
-			continue
-		}
-		for q, p := range quarters {
-			if q.end.Equal(n.end) {
-				if m.revenue {
-					p.Revenue = Value{Why: "check"}
-				} else {
-					p.NetIncome = Value{Why: "check"}
-				}
-			}
-		}
 	}
 }
 

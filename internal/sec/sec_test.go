@@ -177,7 +177,7 @@ func TestRealCompanies(t *testing.T) {
 			t.Errorf("%s Q4 net income %v", c[0], *n.Val)
 		}
 	}
-	// AEP Q3 2022: the second quarter's net income again, to the dollar.
+	// AEP Q3 2022: first tagged a year later (with the second quarter's figure), not in its own filing.
 	if n := period(t, extractFile(t, "AEP").Quarters, "2022-09-30").NetIncome; n.Val != nil {
 		t.Errorf("AEP Q3 2022 net income %v", *n.Val)
 	}
@@ -432,40 +432,6 @@ func TestOnlyFromItsOwnFiling(t *testing.T) {
 	))
 	if len(f.Quarters) != 1 || f.Quarters[0].End != "2026-06-30" {
 		t.Errorf("%+v", f.Quarters)
-	}
-}
-
-func TestThirdQuarterMustAddUp(t *testing.T) {
-	base := []string{
-		"NetIncomeLoss 2026-01-01 2026-03-31 300 2026-05-01 10-Q 0000000001-26-000001",
-		"NetIncomeLoss 2026-04-01 2026-06-30 516e6 2026-08-01 10-Q 0000000001-26-000002",
-		// The second quarter's figure again, under the third's dates.
-		"NetIncomeLoss 2026-07-01 2026-09-30 516e6 2026-11-01 10-Q 0000000001-26-000003",
-		"NetIncomeLoss 2026-01-01 2026-09-30 1474e6 2026-11-01 10-Q 0000000001-26-000003",
-	}
-	base[0] = "NetIncomeLoss 2026-01-01 2026-03-31 0 2026-05-01 10-Q 0000000001-26-000001"
-	f := extract(t, facts(base...))
-	for _, p := range f.Quarters {
-		if p.End == "2026-09-30" && p.NetIncome.Val != nil {
-			t.Errorf("Q3 shown: %v", *p.NetIncome.Val)
-		}
-	}
-	if val(t, period(t, f.Quarters, "2026-06-30").NetIncome) != 516e6 {
-		t.Error("Q2 lost")
-	}
-	// Two equal quarters that add up (Molina, $301 million twice): both stay.
-	ok := []string{
-		"NetIncomeLoss 2024-01-01 2024-03-31 301e6 2024-04-26 10-Q 0000000001-24-000001",
-		"NetIncomeLoss 2024-04-01 2024-06-30 301e6 2024-07-26 10-Q 0000000001-24-000002",
-		"NetIncomeLoss 2024-07-01 2024-09-30 326e6 2024-10-25 10-Q 0000000001-24-000003",
-		"NetIncomeLoss 2024-01-01 2024-09-30 928e6 2024-10-25 10-Q 0000000001-24-000003",
-		"NetIncomeLoss 2026-04-01 2026-06-30 1 2026-08-01 10-Q 0000000001-26-000002",
-	}
-	f = extract(t, facts(ok...))
-	for _, e := range []string{"2024-03-31", "2024-06-30", "2024-09-30"} {
-		if val(t, period(t, f.Quarters, e).NetIncome) == 0 {
-			t.Errorf("%s lost", e)
-		}
 	}
 }
 
