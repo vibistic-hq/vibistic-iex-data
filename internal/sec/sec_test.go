@@ -149,6 +149,21 @@ func TestRealCompanies(t *testing.T) {
 	nullRevenueWhy("BLK", "y", "2024-12-31", "conflict")
 	// AST SpaceMobile's 2024 10-K: contract revenue above the figure that includes taxes.
 	nullRevenueWhy("ASTS", "y", "2024-12-31", "conflict")
+	// Huntington and M&T tag only fee income as contract revenue: smaller than
+	// their own net interest income, so not their revenue.
+	nullRevenue("HBAN", "y", "2025-12-31")
+	nullRevenue("MTB", "y", "2025-12-31")
+	// NextEra Q3 2023: revenue shown, but its year-earlier figure is not, as the
+	// filing's concepts disagree for the earlier quarter.
+	nee := period(t, extractFile(t, "NEE").Quarters, "2023-09-30").Revenue
+	if val(t, nee) != 7200e6 || nee.Prev != nil {
+		t.Errorf("NEE Q3 2023 %+v", nee)
+	}
+	// AEP Q3 2023: net income tagged with the second quarter's figure; the next
+	// year's 10-Q shows the quarter's real one.
+	if n := period(t, extractFile(t, "AEP").Quarters, "2023-09-30").NetIncome; n.Val != nil || n.Why != "check" {
+		t.Errorf("AEP Q3 2023 net income %+v", n)
+	}
 	// L3Harris: the year's total under Q4's dates, no year to check it against.
 	nullRevenue("LHX", "q", "2026-01-02")
 	// Playboy: a business reclassified mid-year, the nine months no longer the sum of the quarters.

@@ -189,6 +189,8 @@ func Extract(r io.Reader, symbol string, now time.Time) (*File, error) {
 	qSince, ySince := newest.AddDate(0, 0, -quarterWindow), newest.AddDate(0, 0, -yearWindow)
 	slip := checkLater(rev, quarters, qSince)
 	slip = checkLater(rev, years, ySince) || slip
+	checkLaterNetIncome(ni, quarters)
+	checkLaterNetIncome(ni, years)
 	checkYears(quarters, years)
 	checkDerivedPrev(quarters)
 	// A scaling slip in the periods shown means the company's revenue tags
@@ -329,10 +331,33 @@ func (m *metric) value(c *cand, why string) Value {
 	}
 	v := c.r.val
 	out := Value{Val: &v, C: c.code, Form: c.r.form, Filed: c.r.filed, Accn: c.r.accn}
-	if p, ok := m.prev(c.r); ok && (!m.revenue || p >= 0) {
+	if p, ok := m.agreedPrev(c.r); ok {
 		out.Prev = &p
 	}
 	return out
+}
+
+// agreedPrev is a figure's year-earlier value, only when every concept the
+// same filing reports for that earlier period agrees with it (within 1%): a
+// current figure's concepts agreeing says nothing of their comparatives'
+// (NextEra's prior-year contract revenue is a part of its revenues).
+func (m *metric) agreedPrev(r *rec) (float64, bool) {
+	p, ok := m.prev(r)
+	if !ok || (m.revenue && p < 0) {
+		return 0, false
+	}
+	if !m.revenue {
+		return p, true
+	}
+	for _, x := range m.byPeriod[span{r.start, r.end}] {
+		if x.accn != r.accn || x.code == r.code {
+			continue
+		}
+		if q, ok := m.prev(&x); ok && q > 0 && math.Abs(q-p) > 0.01*p {
+			return 0, false
+		}
+	}
+	return p, true
 }
 
 // prev is the year-earlier period's value in the same filing under the same
@@ -461,8 +486,8 @@ func (m *metric) derive(yc, nc []cand, n span) (Value, bool) {
 	}
 	v := Value{Val: &val, C: year.code, Form: year.r.form, Filed: year.r.filed, Accn: year.r.accn,
 		Derived: &Derived{Year: Source{year.r.accn, year.r.filed}, Nine: Source{nine.r.accn, nine.r.filed}}}
-	yp, ok1 := m.prev(year.r)
-	np, ok2 := m.prev(nine.r)
+	yp, ok1 := m.agreedPrev(year.r)
+	np, ok2 := m.agreedPrev(nine.r)
 	if ok1 && ok2 && (!m.revenue || yp-np >= 0) {
 		p := yp - np
 		v.Prev = &p
@@ -591,6 +616,34 @@ func checkLater(rev *metric, rows map[span]*Period, since time.Time) bool {
 		}
 	}
 	return slip
+}
+
+// checkLaterNetIncome checks net income against the same period as the next
+// year's filing shows it: a restatement rarely moves net income, so one more
+// than 25% (and $1 million) off is not shown (AEP once tagged its second
+// quarter's net income with the third's dates).
+func checkLaterNetIncome(ni *metric, rows map[span]*Period) {
+	var bad []*Period // changed after the loop, so every check reads the rows as built
+	for sp, p := range rows {
+		if p.NetIncome.Val == nil {
+			continue
+		}
+		v := *p.NetIncome.Val
+		for sp2, recs := range ni.byPeriod {
+			gap := int(sp2.end.Sub(sp.end).Hours() / 24)
+			if gap < 351 || gap > 379 || recs[0].kind != kindOf(days(sp.start, sp.end)) {
+				continue
+			}
+			for _, c := range ni.original(sp2) {
+				if l, ok := ni.prev(c.r); ok && !c.ambiguous && math.Abs(v-l) > 0.25*math.Max(math.Abs(v), math.Abs(l)) && math.Abs(v-l) > 1e6 {
+					bad = append(bad, p)
+				}
+			}
+		}
+	}
+	for _, p := range bad {
+		p.NetIncome = Value{Why: "check"}
+	}
 }
 
 // scaled tells a ratio of about a thousand or a million: a figure tagged in

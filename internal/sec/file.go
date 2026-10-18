@@ -78,8 +78,8 @@ var RevenueCodes = []string{"rev", "rfc", "rfci", "srn", "rnie", "rauor", "rern"
 
 // Parts of revenue, never published: a figure smaller than one of them in
 // the same filing is not the total (a real estate company's contract revenue
-// leaves out its rents).
-var partConcepts = []string{"OperatingLeaseLeaseIncome", "OperatingLeasesIncomeStatementLeaseRevenue"}
+// leaves out its rents, a bank's leaves out its interest income).
+var partConcepts = []string{"OperatingLeaseLeaseIncome", "OperatingLeasesIncomeStatementLeaseRevenue", "InterestIncomeExpenseNet", "NoninterestIncome"}
 
 const (
 	MaxQuarters = 12
