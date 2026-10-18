@@ -20,6 +20,7 @@ const (
 	quarterWindow = 1280
 	yearWindow    = 1830
 	staleDays     = 400
+	maxFilingLag  = 200 // days from a period's end to its own filing
 )
 
 type kind int
@@ -193,7 +194,8 @@ func Extract(r io.Reader, symbol string, now time.Time) (*File, error) {
 	checkLaterNetIncome(ni, quarters)
 	checkLaterNetIncome(ni, years)
 	checkYears(quarters, years)
-	checkRepeats(quarters)
+	checkThirdQuarters(rev, quarters)
+	checkThirdQuarters(ni, quarters)
 	checkDerivedPrev(quarters)
 	// A scaling slip in the periods shown means the company's revenue tags
 	// cannot be trusted: none of its revenue is shown.
@@ -258,6 +260,13 @@ func (m *metric) original(sp span) []cand {
 			first = r.filed
 		}
 	}
+	// Its own filing, not a comparative in a later one: a 10-Q or 10-K is due
+	// 40 to 90 days after the period, so a figure first seen more than 200
+	// days on is only a later report's comparative (AEP's 2022 quarters,
+	// first tagged a year later, with the wrong dates).
+	if f, err := parseDate(first); err != nil || f.Sub(sp.end).Hours()/24 > maxFilingLag {
+		return nil
+	}
 	var out []cand
 	for _, code := range m.codes {
 		var c *cand
@@ -321,19 +330,18 @@ func (m *metric) pick(cs []cand) (*cand, string) {
 			return nil, "conflict"
 		}
 	}
-	// Nor can a total be smaller than its parts in the same filing (each
-	// part once: a bank's net interest income plus its noninterest income).
-	sum := map[string]float64{}
+	// Nor can a total be smaller than its parts in the same filing: a bank's
+	// net interest income plus its noninterest income (which already holds
+	// any lease income), or a landlord's lease income.
+	part := map[string]float64{}
 	for _, p := range m.parts[span{c.r.start, c.r.end}] {
-		if p.filed == c.r.filed && p.val > 0 && p.val > sum[p.code] {
-			sum[p.code] = p.val
+		if p.filed == c.r.filed && p.val > part[p.code] {
+			part[p.code] = p.val
 		}
 	}
-	total := 0.0
-	for _, v := range sum {
-		total += v
-	}
-	if total > c.r.val*1.01 {
+	bank := part["part:InterestIncomeExpenseNet"] + part["part:NoninterestIncome"]
+	lease := math.Max(part["part:OperatingLeaseLeaseIncome"], part["part:OperatingLeasesIncomeStatementLeaseRevenue"])
+	if math.Max(bank, lease) > c.r.val*1.01 {
 		return nil, "check"
 	}
 	return &c, ""
@@ -425,7 +433,8 @@ func (m *metric) fourthQuarters() (out map[span]Value, agreed, badYears map[span
 			if yearBad {
 				badYears[y] = true
 			}
-			if _, direct := m.byPeriod[q]; !direct {
+			// Filed by itself only if in its own filing (not a later one's comparative).
+			if len(m.original(q)) == 0 {
 				out[q] = derived
 				continue
 			}
@@ -660,29 +669,30 @@ func checkLaterNetIncome(ni *metric, rows map[span]*Period) {
 	}
 }
 
-// checkRepeats drops a figure equal, to the dollar, to the quarter before
-// it when the two come from different filings: no business repeats a
-// quarter's revenue or net income exactly, but a tag carried over with the
-// wrong dates does (AEP's third quarters held its second quarters' net
-// income). Both quarters go, as which one is right cannot be told.
-func checkRepeats(quarters map[span]*Period) {
-	get := []func(*Period) *Value{func(p *Period) *Value { return &p.Revenue }, func(p *Period) *Value { return &p.NetIncome }}
-	var bad []*Value
-	for sp, p := range quarters {
-		for sp2, p2 := range quarters {
-			if !sp2.start.Equal(sp.end.AddDate(0, 0, 1)) {
-				continue
-			}
-			for _, g := range get {
-				a, b := g(p), g(p2)
-				if a.Val != nil && b.Val != nil && *a.Val != 0 && *a.Val == *b.Val && a.Accn != b.Accn {
-					bad = append(bad, a, b)
+// checkThirdQuarters drops a third quarter when the first three quarters do
+// not add up to the nine months (each as first reported, within 1% and $1
+// million): a tag carried over with the wrong dates (AEP's third quarters
+// held its second quarters' net income). Equal quarters alone prove nothing:
+// figures are rounded, and Molina earned $301 million in two quarters running.
+func checkThirdQuarters(m *metric, quarters map[span]*Period) {
+	for n, recs := range m.byPeriod {
+		if recs[0].kind != kNine {
+			continue
+		}
+		nine, _ := m.pick(m.original(n))
+		sum, ok := m.firstThree(n)
+		if nine == nil || !ok || math.Abs(nine.r.val-sum) <= 0.01*math.Max(math.Abs(nine.r.val), math.Abs(sum))+1e6 {
+			continue
+		}
+		for q, p := range quarters {
+			if q.end.Equal(n.end) {
+				if m.revenue {
+					p.Revenue = Value{Why: "check"}
+				} else {
+					p.NetIncome = Value{Why: "check"}
 				}
 			}
 		}
-	}
-	for _, v := range bad {
-		*v = Value{Why: "check"}
 	}
 }
 

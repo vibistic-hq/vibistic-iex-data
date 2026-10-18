@@ -131,8 +131,11 @@ func TestRealCompanies(t *testing.T) {
 		if kind == "y" {
 			ps = f.Years
 		}
-		if r := period(t, ps, end).Revenue; r.Val != nil || r.Why != why {
-			t.Errorf("%s %s: %+v, want null (%s)", name, end, r, why)
+		// Not shown: null for that reason, or no row at all when nothing else is shown.
+		for _, p := range ps {
+			if r := p.Revenue; p.End == end && (r.Val != nil || r.Why != why) {
+				t.Errorf("%s %s: %+v, want null (%s)", name, end, r, why)
+			}
 		}
 	}
 	nullRevenue := func(name, kind, end string) { t.Helper(); nullRevenueWhy(name, kind, end, "check") }
@@ -306,7 +309,9 @@ func TestFourthQuarter(t *testing.T) {
 	}
 	f := extract(t, facts(base...))
 	q := period(t, f.Quarters, "2025-12-31")
-	if q.Start != "2025-10-01" || val(t, q.Revenue) != 120 || *q.Revenue.Prev != 90 || q.Revenue.Derived == nil || q.Revenue.Derived.Nine.Filed != "2025-11-01" {
+	// No prev: the prior year is only in these filings' comparatives, so its
+	// fourth quarter as first reported is unknown and the computed prev unchecked.
+	if q.Start != "2025-10-01" || val(t, q.Revenue) != 120 || q.Revenue.Prev != nil || q.Revenue.Derived == nil || q.Revenue.Derived.Nine.Filed != "2025-11-01" {
 		t.Errorf("%+v", q.Revenue)
 	}
 	// A loss in Q4: net income may go negative, revenue may not.
@@ -419,19 +424,47 @@ func TestUnitSlipAgainstALaterFiling(t *testing.T) {
 	}
 }
 
-func TestRepeatedQuarter(t *testing.T) {
+func TestOnlyFromItsOwnFiling(t *testing.T) {
+	// First seen a year later, as a comparative: not shown.
 	f := extract(t, facts(
-		"NetIncomeLoss 2026-01-01 2026-03-31 516 2026-05-01 10-Q 0000000001-26-000001",
-		"NetIncomeLoss 2026-04-01 2026-06-30 516 2026-08-01 10-Q 0000000001-26-000002",
-		"Revenues 2026-01-01 2026-03-31 900 2026-05-01 10-Q 0000000001-26-000001",
-		"Revenues 2026-04-01 2026-06-30 950 2026-08-01 10-Q 0000000001-26-000002",
+		"NetIncomeLoss 2025-04-01 2025-06-30 520 2026-08-02 10-Q 0000000001-26-000003",
+		"NetIncomeLoss 2026-04-01 2026-06-30 958 2026-08-02 10-Q 0000000001-26-000003",
 	))
+	if len(f.Quarters) != 1 || f.Quarters[0].End != "2026-06-30" {
+		t.Errorf("%+v", f.Quarters)
+	}
+}
+
+func TestThirdQuarterMustAddUp(t *testing.T) {
+	base := []string{
+		"NetIncomeLoss 2026-01-01 2026-03-31 300 2026-05-01 10-Q 0000000001-26-000001",
+		"NetIncomeLoss 2026-04-01 2026-06-30 516e6 2026-08-01 10-Q 0000000001-26-000002",
+		// The second quarter's figure again, under the third's dates.
+		"NetIncomeLoss 2026-07-01 2026-09-30 516e6 2026-11-01 10-Q 0000000001-26-000003",
+		"NetIncomeLoss 2026-01-01 2026-09-30 1474e6 2026-11-01 10-Q 0000000001-26-000003",
+	}
+	base[0] = "NetIncomeLoss 2026-01-01 2026-03-31 0 2026-05-01 10-Q 0000000001-26-000001"
+	f := extract(t, facts(base...))
 	for _, p := range f.Quarters {
-		if p.NetIncome.Val != nil {
-			t.Errorf("%s repeated net income shown", p.End)
+		if p.End == "2026-09-30" && p.NetIncome.Val != nil {
+			t.Errorf("Q3 shown: %v", *p.NetIncome.Val)
 		}
-		if p.Revenue.Val == nil {
-			t.Errorf("%s revenue lost", p.End)
+	}
+	if val(t, period(t, f.Quarters, "2026-06-30").NetIncome) != 516e6 {
+		t.Error("Q2 lost")
+	}
+	// Two equal quarters that add up (Molina, $301 million twice): both stay.
+	ok := []string{
+		"NetIncomeLoss 2024-01-01 2024-03-31 301e6 2024-04-26 10-Q 0000000001-24-000001",
+		"NetIncomeLoss 2024-04-01 2024-06-30 301e6 2024-07-26 10-Q 0000000001-24-000002",
+		"NetIncomeLoss 2024-07-01 2024-09-30 326e6 2024-10-25 10-Q 0000000001-24-000003",
+		"NetIncomeLoss 2024-01-01 2024-09-30 928e6 2024-10-25 10-Q 0000000001-24-000003",
+		"NetIncomeLoss 2026-04-01 2026-06-30 1 2026-08-01 10-Q 0000000001-26-000002",
+	}
+	f = extract(t, facts(ok...))
+	for _, e := range []string{"2024-03-31", "2024-06-30", "2024-09-30"} {
+		if val(t, period(t, f.Quarters, e).NetIncome) == 0 {
+			t.Errorf("%s lost", e)
 		}
 	}
 }
