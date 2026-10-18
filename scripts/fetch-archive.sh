@@ -9,8 +9,9 @@ mkdir -p "$dir"
 oldest="$(date -u -d "$(date -u +%Y-%m-01) -49 months" +%Y-%m)"
 for tag in $(gh release list --limit 1000 --json tagName --jq '.[].tagName | select(startswith("days-"))'); do
   [[ "${tag#days-}" < "$oldest" ]] && continue
-  # A month's release with no day file yet (an older archive-day.sh left
-  # one empty when its upload failed) holds nothing to fetch.
+  # A month's release with no day file yet (archive-day.sh creates the
+  # release before uploading, so a failed upload leaves it empty) holds
+  # nothing to fetch.
   if [ "$(gh release view "$tag" --json assets --jq '[.assets[].name | select(startswith("20") and endswith(".jsonl.gz"))] | length')" = 0 ]; then
     echo "::warning::$tag has no day files" >&2
     continue

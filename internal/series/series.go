@@ -354,12 +354,17 @@ func reviewMatchesGap(r Review, gap float64) error {
 }
 
 // publishedVolume rounds a session's split-adjusted share volume to whole
-// shares, but never below 1: after a large reverse split, an old session's
-// adjusted volume can be a fraction of a share, and a 0 would make the app
-// (and the preview check, internal/og) reject the whole file. The session
-// did trade; its VWAP still uses the unrounded volume.
+// shares, except under one share: after a large reverse split, an old
+// session's adjusted volume can be a fraction of a share, and rounding it to
+// 0 made the app (and the preview check, internal/og) reject the whole file.
+// The fraction is kept as is (both accept any positive volume): rounding it
+// up to 1 would overstate that session's weight in volume averages and
+// anchored VWAPs.
 func publishedVolume(v float64) float64 {
-	return math.Max(1, math.Round(v))
+	if r := math.Round(v); r >= 1 {
+		return r
+	}
+	return v
 }
 
 // priorNotional takes only the sessions since the last break (the caller

@@ -467,8 +467,8 @@ func TestThreeForTwoShapedGapRightAfterABreakIsCut(t *testing.T) {
 }
 
 // Issue #10: after a big reverse split, an old session's adjusted volume can
-// be under half a share. It is published as 1, never 0 (the app rejects a
-// file with a zero-volume bar).
+// be under half a share. It is published as that fraction, never 0 (the app
+// rejects a file with a zero-volume bar) and never rounded up to 1.
 func TestTinyAdjustedVolumeIsNeverZero(t *testing.T) {
 	bs := make([]*bar, 30)
 	for i := range bs {
@@ -481,9 +481,10 @@ func TestTinyAdjustedVolumeIsNeverZero(t *testing.T) {
 	if len(f.Splits) != 1 {
 		t.Fatalf("splits = %+v", f.Splits)
 	}
-	for _, b := range f.Bars {
-		if b[5] < 1 {
-			t.Fatalf("bar %v has volume %v", b[0], b[5])
-		}
+	if v := f.Bars[0][5]; v != 0.25 {
+		t.Fatalf("first bar volume = %v, want 0.25", v)
+	}
+	if v := f.Bars[29][5]; v != float64(int64(5e6/20)) {
+		t.Fatalf("last bar volume = %v", v)
 	}
 }
