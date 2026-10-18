@@ -87,6 +87,10 @@ func TestRealCompanies(t *testing.T) {
 		{"COST", "q", "2026-08-30", 95720e6, 2998e6, "rfc", true},
 		// Kroger: a 16-week first quarter.
 		{"KR", "q", "2026-05-23", 46120e6, 903e6, "rfc", false},
+		// Plexus: the nine months under the year's concept (the other one is in thousands).
+		{"PLXS", "q", "2025-09-27", 1058.4e6, 51.429e6, "rfci", true},
+		// AST SpaceMobile: the 10-K's larger tag is not the total; the next 10-K's comparative picks the one that is.
+		{"ASTS", "y", "2024-12-31", 4.4e6, -300.08e6, "rev", false},
 	}
 	for _, c := range cases {
 		f := extractFile(t, c.name)
@@ -125,6 +129,33 @@ func TestRealCompanies(t *testing.T) {
 	f := extractFile(t, "NVDA")
 	if len(f.Quarters) != MaxQuarters || len(f.Years) != MaxYears {
 		t.Errorf("NVDA: %d quarters, %d years", len(f.Quarters), len(f.Years))
+	}
+	nullRevenue := func(name, kind, end string) {
+		t.Helper()
+		f := extractFile(t, name)
+		ps := f.Quarters
+		if kind == "y" {
+			ps = f.Years
+		}
+		if r := period(t, ps, end).Revenue; r.Val != nil || r.Why != "check" {
+			t.Errorf("%s %s: %+v", name, end, r)
+		}
+	}
+	// L3Harris: the year's total under Q4's dates, no year to check it against.
+	nullRevenue("LHX", "q", "2026-01-02")
+	// Playboy: a business reclassified mid-year, the nine months no longer the sum of the quarters.
+	nullRevenue("PLBY", "q", "2024-12-31")
+	// Better: a quarter restated to under a third of what was first filed.
+	nullRevenue("BETR", "q", "2023-09-30")
+	// TYGO: thousands tagged as dollars for years: none of its revenue is shown, net income is.
+	ty := extractFile(t, "TYGO")
+	for _, p := range append(ty.Quarters, ty.Years...) {
+		if p.Revenue.Val != nil {
+			t.Errorf("TYGO %s revenue shown: %v", p.End, *p.Revenue.Val)
+		}
+	}
+	if val(t, period(t, ty.Quarters, "2026-06-30").NetIncome) != 2174e3 {
+		t.Error("TYGO net income")
 	}
 	// Costco's 2010-era quarters (with the old 85-99 day rule the only "quarters"
 	// left) never come back: rows stay within the company's newest period's window.
@@ -268,6 +299,64 @@ func TestNegativeRevenue(t *testing.T) {
 	}
 }
 
+func TestYearOverTenTimesItsQuarters(t *testing.T) {
+	lines := []string{
+		// Quarters tagged with a partial line (a bank's fees), the year with the total.
+		"Revenues 2025-01-01 2025-03-31 1 2025-05-01 10-Q 0000000001-25-000001",
+		"Revenues 2025-04-01 2025-06-30 1 2025-08-01 10-Q 0000000001-25-000002",
+		"Revenues 2025-07-01 2025-09-30 1 2025-11-01 10-Q 0000000001-25-000003",
+		"Revenues 2025-01-01 2025-12-31 400 2026-02-20 10-K 0000000001-26-000001",
+		"Revenues 2026-01-01 2026-03-31 100 2026-05-01 10-Q 0000000001-26-000002",
+	}
+	f := extract(t, facts(lines...))
+	for _, p := range append(f.Quarters, f.Years...) {
+		if p.End <= "2025-12-31" && p.Revenue.Val != nil {
+			t.Errorf("%s shown: %v", p.End, *p.Revenue.Val)
+		}
+	}
+	// The other periods stand (not a unit slip: the company keeps its revenue).
+	if val(t, period(t, f.Quarters, "2026-03-31").Revenue) != 100 {
+		t.Error("2026 Q1")
+	}
+	// Quarters of zero revenue are no evidence against a year.
+	zero := append([]string{}, lines...)
+	for i := 0; i < 3; i++ {
+		zero[i] = strings.Replace(zero[i], " 1 20", " 0 20", 1)
+	}
+	if val(t, period(t, extract(t, facts(zero...)).Years, "2025-12-31").Revenue) != 400 {
+		t.Error("zero quarters voided the year")
+	}
+}
+
+func TestUnitSlipAgainstALaterFiling(t *testing.T) {
+	lines := []string{
+		// Q1 2025 tagged in thousands as dollars; the 2026 Q1 10-Q shows it right.
+		"Revenues 2025-01-01 2025-03-31 9802000 2025-05-01 10-Q 0000000001-25-000001",
+		"Revenues 2026-01-01 2026-03-31 12000 2026-05-01 10-Q 0000000001-26-000001",
+		"Revenues 2025-01-01 2025-03-31 9802 2026-05-01 10-Q 0000000001-26-000001",
+		"NetIncomeLoss 2026-01-01 2026-03-31 -5 2026-05-01 10-Q 0000000001-26-000001",
+		"NetIncomeLoss 2025-01-01 2025-03-31 -3 2025-05-01 10-Q 0000000001-25-000001",
+	}
+	f := extract(t, facts(lines...))
+	for _, p := range f.Quarters {
+		if p.Revenue.Val != nil {
+			t.Errorf("%s revenue shown after a unit slip: %v", p.End, *p.Revenue.Val)
+		}
+	}
+	if val(t, period(t, f.Quarters, "2026-03-31").NetIncome) != -5 {
+		t.Error("net income lost")
+	}
+	// Off by 5 times: a restatement or a partial line, only that period goes.
+	lines[0] = "Revenues 2025-01-01 2025-03-31 49010 2025-05-01 10-Q 0000000001-25-000001"
+	f = extract(t, facts(lines...))
+	if r := period(t, f.Quarters, "2025-03-31").Revenue; r.Val != nil || r.Why != "check" {
+		t.Errorf("Q1 2025 %+v", r)
+	}
+	if val(t, period(t, f.Quarters, "2026-03-31").Revenue) != 12000 {
+		t.Error("2026 Q1")
+	}
+}
+
 func TestFiftyThreeWeekYear(t *testing.T) {
 	// 53-week fiscal year (371 days) with a 14-week fourth quarter (98 days).
 	f := extract(t, facts(
@@ -297,6 +386,13 @@ func TestCIKAsString(t *testing.T) {
 	}
 }
 
+func TestDataAfterTheDocument(t *testing.T) {
+	doc := facts("Revenues 2026-04-01 2026-06-30 5 2026-08-01 10-Q 0000000001-26-000001") + `{"cik":1}`
+	if _, err := Extract(strings.NewReader(doc), "TEST", now); err == nil {
+		t.Error("trailing data accepted")
+	}
+}
+
 func TestNoQuartersIsAnEmptyList(t *testing.T) {
 	f := extract(t, facts("Revenues 2025-07-01 2026-06-30 5 2026-08-01 10-K 0000000001-26-000001"))
 	b, _ := json.Marshal(f)
@@ -322,7 +418,8 @@ func TestTickers(t *testing.T) {
 		[15,"U S PHYSICAL THERAPY INC /NV","USPH","NYSE"],[16,"Redwood Trust Inc","RWT","NYSE"],
 		[17,"Old Co","GOOG","NYSE"],[18,"Beat Co","BEATW","Nasdaq"],[18,"Beat Co","BEAT","Nasdaq"],
 		[19,"Franklin Templeton Digital Holdings Trust","EZBC","Cboe"],[20,"VS Trust","UVIX","Cboe"],
-		[21,"Invesco CurrencyShares Euro Trust","FXE","NYSE"]]}`
+		[21,"Invesco CurrencyShares Euro Trust","FXE","NYSE"],
+		[22,"COTWO ADVISORS PHYSICAL EUROPEAN CARBON ALLOWANCE TRUST","CTWO","NYSE"]]}`
 	reviewed := []Class{{"BRK.A", 4}, {"GOOG", 3}}
 	m, err := Tickers(strings.NewReader(doc), reviewed)
 	if err != nil {

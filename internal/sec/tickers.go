@@ -32,7 +32,7 @@ func ValidateClasses(cs []Class) error {
 // products) have no business revenue; their "net income" is the change in
 // the value of what they hold. Matched on the name SEC lists, which is used
 // for nothing else and never published.
-var fundRe = regexp.MustCompile(`(?i)\b(ETF|ETFs|Fund|Funds|Trust II|Commodity|ProShares|iShares|SPDR|Invesco DB|Grayscale|Teucrium|CurrencyShares|VS Trust|Holdings Trust)\b|\b(Bitcoin|Ether|Ethereum|Solana|XRP|Dogecoin|Litecoin|Avalanche|Chainlink|Stellar|Sui|Bittensor|Horizen|Zcash|Crypto|Gold|Silver|Platinum|Palladium|Precious Metals)\b.*\b(Trust|ETF)\b`)
+var fundRe = regexp.MustCompile(`(?i)\b(ETF|ETFs|Fund|Funds|Trust II|Commodity|ProShares|iShares|SPDR|Invesco DB|Grayscale|Teucrium|CurrencyShares|VS Trust|Holdings Trust|Carbon Allowance)\b|\bPhysical\b.*\bTrust\b|\b(Bitcoin|Ether|Ethereum|Solana|XRP|Dogecoin|Litecoin|Avalanche|Chainlink|Stellar|Sui|Bittensor|Horizen|Zcash|Crypto|Gold|Silver|Platinum|Palladium|Precious Metals)\b.*\b(Trust|ETF)\b`)
 
 // Tickers reads SEC's company_tickers_exchange.json ({"fields": [...],
 // "data": [[cik, name, ticker, exchange], ...]}) into the app's symbols and

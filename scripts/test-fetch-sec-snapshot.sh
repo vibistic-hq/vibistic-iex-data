@@ -68,4 +68,19 @@ for i,t in enumerate(itertools.product(string.ascii_uppercase, repeat=4)):
 tar -C "$d" -czf "$ASSETS/sec-20261018.tar.gz" .; rm -rf "$d"
 bash "$fetch" "$tmp/out5" >/dev/null 2>&1 || true
 [ ! -e "$tmp/out5" ] || fail "unpacked a snapshot of over 20,000 entries"
+# A small archive whose listing is huge (PAX headers: long names; owner
+# names are not listed).
+rm -f "$ASSETS"/*
+python3 - "$ASSETS/sec-20261018.tar.gz" <<'PY'
+import io, sys, tarfile
+with tarfile.open(sys.argv[1], "w:gz", format=tarfile.PAX_FORMAT) as t:
+    for i in range(100):
+        info = tarfile.TarInfo("./" + "A" * 100000 + str(i) + ".json")
+        info.uname = "u" * 100000
+        info.size = 2
+        t.addfile(info, io.BytesIO(b"{}"))
+PY
+[ "$(stat -c %s "$ASSETS/sec-20261018.tar.gz")" -lt 200000 ] || fail "test archive not small"
+bash "$fetch" "$tmp/out6" >/dev/null 2>&1 || true
+[ ! -e "$tmp/out6" ] || fail "unpacked an archive with a huge listing"
 echo "fetch-sec-snapshot.sh: ok"

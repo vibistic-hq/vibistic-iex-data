@@ -22,7 +22,14 @@ gh release download sec -p "$newest" -D "$tmp"
 # The whole listing first (no early exit that could hide a bad entry), then
 # every line checked: plain files named like a symbol or snapshot.json, and the
 # top directory; bounded count and size.
-timeout 120 tar -tvzf "$tmp/$newest" > "$tmp/list" || skip "$newest could not be listed"
+# The listing itself is capped (long owner names or PAX headers could make it
+# huge): a listing cut short, or one tar could not finish, is rejected.
+max_list=4000000
+set +o pipefail
+timeout 120 tar --numeric-owner -tvzf "$tmp/$newest" 2>/dev/null | head -c "$max_list" > "$tmp/list"
+rc=${PIPESTATUS[0]}
+set -o pipefail
+[ "$rc" = 0 ] && [ "$(stat -c %s "$tmp/list")" -lt "$max_list" ] || skip "$newest could not be listed"
 # (Plain POSIX patterns: mawk has no {m,n}.)
 awk -v max_n="$max_entries" -v max_b="$max_unpacked" \
   -v sym='^[.]/[A-Z][A-Z]?[A-Z]?[A-Z]?[A-Z]?[.]json$' -v cls='^[.]/[A-Z][A-Z]?[A-Z]?[A-Z]?[A-Z]?[.][A-Z][.]json$' '

@@ -86,8 +86,12 @@ func Extract(r io.Reader, symbol string, now time.Time) (*File, error) {
 			USGAAP map[string]json.RawMessage `json:"us-gaap"`
 		} `json:"facts"`
 	}
-	if err := json.NewDecoder(r).Decode(&cf); err != nil {
+	dec := json.NewDecoder(r)
+	if err := dec.Decode(&cf); err != nil {
 		return nil, err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, fmt.Errorf("data after the document")
 	}
 	cik, err := parseCIK(cf.CIK)
 	if err != nil {
@@ -150,16 +154,51 @@ func Extract(r io.Reader, symbol string, now time.Time) (*File, error) {
 		}
 	}
 	for _, m := range []*metric{rev, ni} {
+		fourth, agreed, badYears := m.fourthQuarters()
 		for sp, recs := range m.byPeriod {
-			if k := recs[0].kind; k != kNine {
-				put(sp, k, m.value(m.pick(m.original(sp))), m.revenue)
+			k := recs[0].kind
+			if k == kNine {
+				continue
 			}
+			v := m.value(m.pick(m.original(sp)))
+			// A quarter from an annual report only when it agrees with the
+			// year minus nine months; a year found inconsistent is not shown.
+			if (k == kQuarter && v.Val != nil && v.Form != "10-Q" && !agreed[sp]) || (k == kYear && badYears[sp]) {
+				v = Value{Why: "check"}
+			}
+			put(sp, k, v, m.revenue)
 		}
-		for sp, v := range m.fourthQuarters() {
+		for sp, v := range fourth {
 			put(sp, kQuarter, v, m.revenue)
 		}
 	}
+	newest := newestEnd(quarters, years)
+	qSince, ySince := newest.AddDate(0, 0, -quarterWindow), newest.AddDate(0, 0, -yearWindow)
+	slip := checkLater(rev, quarters, qSince)
+	slip = checkLater(rev, years, ySince) || slip
 	checkYears(quarters, years)
+	checkDerivedPrev(quarters)
+	// A scaling slip in the periods shown means the company's revenue tags
+	// cannot be trusted: none of its revenue is shown.
+	if slip {
+		for _, rows := range []map[span]*Period{quarters, years} {
+			for _, p := range rows {
+				p.Revenue = Value{Why: "check"}
+			}
+		}
+	}
+	newest = newestEnd(quarters, years)
+	if newest.IsZero() || now.Sub(newest).Hours()/24 > staleDays {
+		return nil, nil
+	}
+	f := &File{V: 1, Source: "SEC", Symbol: symbol, CIK: cik, GeneratedAt: now.UTC().Format(time.RFC3339)}
+	f.Quarters = keep(quarters, newest.AddDate(0, 0, -quarterWindow), MaxQuarters)
+	f.Years = keep(years, newest.AddDate(0, 0, -yearWindow), MaxYears)
+	return f, nil
+}
+
+// newestEnd is the end of the company's newest period with a value.
+func newestEnd(quarters, years map[span]*Period) time.Time {
 	newest := time.Time{}
 	for _, rows := range []map[span]*Period{quarters, years} {
 		for sp, p := range rows {
@@ -168,13 +207,7 @@ func Extract(r io.Reader, symbol string, now time.Time) (*File, error) {
 			}
 		}
 	}
-	if newest.IsZero() || now.Sub(newest).Hours()/24 > staleDays {
-		return nil, nil
-	}
-	f := &File{V: 1, Source: "SEC", Symbol: symbol, CIK: cik, GeneratedAt: now.UTC().Format(time.RFC3339)}
-	f.Quarters = keep(quarters, newest.AddDate(0, 0, -quarterWindow), MaxQuarters)
-	f.Years = keep(years, newest.AddDate(0, 0, -yearWindow), MaxYears)
-	return f, nil
+	return newest
 }
 
 func parseCIK(raw json.RawMessage) (int64, error) {
@@ -298,19 +331,18 @@ func (m *metric) prev(r *rec) (float64, bool) {
 }
 
 // fourthQuarters gives each fiscal year's last quarter: the year minus the
-// nine months that start with it, both as first reported. A quarter filed by
-// itself is kept only if it agrees with that; a filed revenue equal to the
-// whole year (some filers tag the year's total with the quarter's dates) is
-// replaced by the computed one, or not shown when there is none.
-func (m *metric) fourthQuarters() map[span]Value {
-	out := map[span]Value{}
+// nine months that start with it, both as first reported. It also returns
+// the quarters filed in an annual report that agree with that computation
+// (any other quarter from a 10-K is not shown: some filers tag the year's
+// total with the quarter's dates), and the years found inconsistent.
+func (m *metric) fourthQuarters() (out map[span]Value, agreed, badYears map[span]bool) {
+	out, agreed, badYears = map[span]Value{}, map[span]bool{}, map[span]bool{}
 	for y, yrecs := range m.byPeriod {
 		if yrecs[0].kind != kYear {
 			continue
 		}
 		yc := m.original(y)
 		yPick, _ := m.pick(yc)
-		checked := map[span]bool{}
 		for n, nrecs := range m.byPeriod {
 			if nrecs[0].kind != kNine || !n.start.Equal(y.start) {
 				continue
@@ -319,81 +351,112 @@ func (m *metric) fourthQuarters() map[span]Value {
 			if kindOf(days(q.start, q.end)) != kQuarter {
 				continue
 			}
-			checked[q] = true
-			derived := m.derive(yc, m.original(n))
+			derived, yearBad := m.derive(yc, m.original(n), n)
+			if yearBad {
+				badYears[y] = true
+			}
 			if _, direct := m.byPeriod[q]; !direct {
 				out[q] = derived
 				continue
 			}
 			dv := m.value(m.pick(m.original(q)))
-			if dv.Val == nil || yPick == nil {
+			if dv.Val == nil || yPick == nil || derived.Val == nil {
 				continue
 			}
-			tol := 0.005 * math.Abs(yPick.r.val)
 			switch {
-			case derived.Val != nil && math.Abs(*dv.Val-*derived.Val) <= tol:
-				// Agrees: the filed quarter stays.
-			case derived.Val != nil && m.revenue && math.Abs(*dv.Val-yPick.r.val) <= 0.001*math.Abs(yPick.r.val):
+			case math.Abs(*dv.Val-*derived.Val) <= 0.005*math.Abs(yPick.r.val):
+				agreed[q] = true
+			case m.revenue && math.Abs(*dv.Val-yPick.r.val) <= 0.001*math.Abs(yPick.r.val):
 				// The year's total under the quarter's dates: the computed quarter is the one.
 				out[q] = derived
-			default:
-				out[q] = Value{Why: "check"}
-			}
-		}
-		if !m.revenue || yPick == nil {
-			continue
-		}
-		for q, qrecs := range m.byPeriod {
-			if qrecs[0].kind != kQuarter || !q.end.Equal(y.end) || checked[q] {
-				continue
-			}
-			if dv := m.value(m.pick(m.original(q))); dv.Val != nil && math.Abs(*dv.Val-yPick.r.val) <= 0.001*math.Abs(yPick.r.val) {
-				out[q] = Value{Why: "check"}
 			}
 		}
 	}
-	return out
+	return out, agreed, badYears
 }
 
-// derive is year minus nine months under the first concept, largest year
-// value first, that both report.
-func (m *metric) derive(yc, nc []cand) Value {
+// derive is year minus nine months, under the nine months' own figure's
+// concept, which must also be the year's (or one equal to it): two concepts
+// can differ in scale or scope. It is checked against the first three
+// quarters when all three were filed (their sum must be the nine months), and
+// for revenue against a year more than ten times the nine months (a scaling
+// slip in the year's tag), which also marks the year bad.
+func (m *metric) derive(yc, nc []cand, n span) (Value, bool) {
 	for _, c := range append(append([]cand{}, yc...), nc...) {
 		if c.ambiguous {
-			return Value{Why: "ambiguous"}
+			return Value{Why: "ambiguous"}, false
 		}
 	}
-	for _, y := range order(yc) {
-		for _, n := range nc {
-			if n.code != y.code {
+	if len(yc) == 0 || len(nc) == 0 {
+		return Value{Why: "none"}, false
+	}
+	top := order(yc)[0]
+	nine := order(nc)[0]
+	var year *cand
+	for i := range yc {
+		if yc[i].code == nine.code && math.Abs(yc[i].r.val-top.r.val) <= 1e-4*math.Abs(top.r.val) {
+			year = &yc[i]
+		}
+	}
+	if year == nil {
+		return Value{Why: "none"}, false
+	}
+	// The nine months as filed before the year (in a 10-Q of that year), not
+	// a comparative in a later 10-Q on a newer basis.
+	if nine.r.filed > year.r.filed {
+		return Value{Why: "none"}, false
+	}
+	if m.revenue && nine.r.val > 0 && year.r.val > 10*nine.r.val {
+		return Value{Why: "check"}, true
+	}
+	if sum, ok := m.firstThree(n); ok && math.Abs(nine.r.val-sum) > 0.005*math.Max(math.Abs(nine.r.val), math.Abs(sum)) {
+		return Value{Why: "check"}, false
+	}
+	val := year.r.val - nine.r.val
+	if m.revenue && (val < 0 || val > year.r.val*1.001) {
+		return Value{Why: "check"}, false
+	}
+	v := Value{Val: &val, C: year.code, Form: year.r.form, Filed: year.r.filed, Accn: year.r.accn,
+		Derived: &Derived{Year: Source{year.r.accn, year.r.filed}, Nine: Source{nine.r.accn, nine.r.filed}}}
+	yp, ok1 := m.prev(year.r)
+	np, ok2 := m.prev(nine.r)
+	if ok1 && ok2 && (!m.revenue || yp-np >= 0) {
+		p := yp - np
+		v.Prev = &p
+	}
+	return v, false
+}
+
+// firstThree is the sum of the three quarters that tile the nine months, each
+// as first reported; false unless all three are there with a value.
+func (m *metric) firstThree(n span) (float64, bool) {
+	sum, at := 0.0, n.start
+	for range 3 {
+		found := false
+		for q, recs := range m.byPeriod {
+			if recs[0].kind != kQuarter || !q.start.Equal(at) || q.end.After(n.end) {
 				continue
 			}
-			// The nine months as filed before the year (in a 10-Q of that
-			// year), not a comparative in a later 10-Q on a newer basis.
-			if n.r.filed > y.r.filed {
-				return Value{Why: "none"}
+			c, _ := m.pick(m.original(q))
+			if c == nil {
+				return 0, false
 			}
-			val := y.r.val - n.r.val
-			if m.revenue && (val < 0 || val > y.r.val*1.001) {
-				return Value{Why: "check"}
-			}
-			v := Value{Val: &val, C: y.code, Form: y.r.form, Filed: y.r.filed, Accn: y.r.accn,
-				Derived: &Derived{Year: Source{y.r.accn, y.r.filed}, Nine: Source{n.r.accn, n.r.filed}}}
-			yp, ok1 := m.prev(y.r)
-			np, ok2 := m.prev(n.r)
-			if ok1 && ok2 && (!m.revenue || yp-np >= 0) {
-				p := yp - np
-				v.Prev = &p
-			}
-			return v
+			sum += c.r.val
+			at = q.end.AddDate(0, 0, 1)
+			found = true
+			break
+		}
+		if !found {
+			return 0, false
 		}
 	}
-	return Value{Why: "none"}
+	return sum, at.AddDate(0, 0, -1).Equal(n.end)
 }
 
 // checkYears drops a year's revenue that is smaller than one of its own
 // quarters (some filers tag a single line, not the total, as Revenues in
-// their 10-K), and the fourth quarter computed from it. Which of the two is
+// their 10-K), or over ten times three or more of them (then those quarters
+// are not shown either), and the fourth quarter computed from it. Which of the two is
 // wrong cannot be told, so neither is shown; the other quarters stand on
 // their own filings.
 func checkYears(quarters, years map[span]*Period) {
@@ -402,10 +465,25 @@ func checkYears(quarters, years map[span]*Period) {
 			continue
 		}
 		bad := false
+		sum, n := 0.0, 0
 		for qs, q := range quarters {
-			if !qs.start.Before(ys.start) && !qs.end.After(ys.end) && q.Revenue.Val != nil && *q.Revenue.Val > *y.Revenue.Val*1.001 {
-				bad = true
+			if !qs.start.Before(ys.start) && !qs.end.After(ys.end) && q.Revenue.Val != nil {
+				if *q.Revenue.Val > *y.Revenue.Val*1.001 {
+					bad = true
+				}
+				sum += *q.Revenue.Val
+				n++
 			}
+		}
+		// Three or more of its quarters known: a year over ten times their sum
+		// does not fit them, nor they it; none of them is shown.
+		if n >= 3 && sum > 0 && *y.Revenue.Val > 10*sum {
+			for qs, q := range quarters {
+				if !qs.start.Before(ys.start) && !qs.end.After(ys.end) {
+					q.Revenue = Value{Why: "check"}
+				}
+			}
+			bad = true
 		}
 		if !bad {
 			continue
@@ -416,6 +494,92 @@ func checkYears(quarters, years map[span]*Period) {
 			}
 		}
 		y.Revenue = Value{Why: "check"}
+	}
+}
+
+// checkLater checks each revenue figure against the same period as the next
+// year's filing shows it (the `prev` of the row a year later, a figure the
+// company filed again): a restatement moves a figure a little, while a
+// scaling slip (thousands tagged as dollars) or a partial line tagged as the
+// total does not survive the comparison. When they disagree by more than 10%
+// and another concept of the original filing matches the later figure, that
+// one is used; otherwise a figure off by more than 3 times is not shown, and
+// one off by about a thousand or a million times (thousands tagged as
+// dollars) is reported as a slip when the period is one shown (ending on or
+// after `since`). The later figures are read before any row changes.
+func checkLater(rev *metric, rows map[span]*Period, since time.Time) bool {
+	later := map[span]float64{}
+	for sp := range rows {
+		for sp2, p2 := range rows {
+			gap := int(sp2.end.Sub(sp.end).Hours() / 24)
+			if gap >= 351 && gap <= 379 && p2.Revenue.Prev != nil && *p2.Revenue.Prev > 0 {
+				later[sp] = *p2.Revenue.Prev
+			}
+		}
+	}
+	off := func(a, b float64) float64 { return math.Max(a, b) / math.Min(a, b) }
+	slip := false
+	for sp, p := range rows {
+		v := p.Revenue
+		l, ok := later[sp]
+		if v.Val == nil || *v.Val <= 0 || !ok || off(*v.Val, l) <= 1.1 {
+			continue
+		}
+		switched := false
+		if v.Derived == nil {
+			for _, c := range rev.original(sp) {
+				if !c.ambiguous && c.r.val > 0 && off(c.r.val, l) <= 1.01 {
+					p.Revenue = rev.value(&c, "")
+					switched = true
+					break
+				}
+			}
+		}
+		switch {
+		case scaled(off(*v.Val, l)) && !sp.end.Before(since):
+			// Thousands (or millions) tagged as dollars in a period shown,
+			// even if another concept had it right.
+			slip = true
+		case switched:
+			// Another concept of the same filing matches the later figure.
+		case off(*v.Val, l) > 3:
+			// A large restatement or a partial line: this figure is not shown.
+			p.Revenue = Value{Why: "check"}
+		}
+	}
+	return slip
+}
+
+// scaled tells a ratio of about a thousand or a million: a figure tagged in
+// the wrong unit.
+func scaled(r float64) bool {
+	return (r >= 900 && r <= 1100) || (r >= 9e5 && r <= 1.1e6)
+}
+
+// checkDerivedPrev keeps a computed fourth quarter's year-earlier value only
+// when it matches that quarter as first reported a year before (the two
+// comparatives come from two filings, and one may be on a reclassified basis).
+func checkDerivedPrev(quarters map[span]*Period) {
+	for sp, p := range quarters {
+		for _, get := range []func(*Period) *Value{func(p *Period) *Value { return &p.Revenue }, func(p *Period) *Value { return &p.NetIncome }} {
+			v := get(p)
+			if v.Derived == nil || v.Prev == nil {
+				continue
+			}
+			ok := false
+			for sp2, p2 := range quarters {
+				gap := int(sp.end.Sub(sp2.end).Hours() / 24)
+				if gap < 351 || gap > 379 {
+					continue
+				}
+				if w := get(p2); w.Val != nil && math.Abs(*w.Val-*v.Prev) <= 0.01*math.Max(math.Abs(*w.Val), math.Abs(*v.Prev)) {
+					ok = true
+				}
+			}
+			if !ok {
+				v.Prev = nil
+			}
+		}
 	}
 }
 

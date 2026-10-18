@@ -237,7 +237,19 @@ func copySEC(dir, dst string, now time.Time) (map[string]any, error) {
 	return map[string]any{"source": "SEC", "generatedAt": snap.GeneratedAt, "files": n}, nil
 }
 
+// A symbol's SEC file is a few KB; anything near this is not one.
+const secMaxFile = 256 << 10
+
+// decodeStrict reads one small JSON document: known fields only, nothing
+// after it.
 func decodeStrict(path string, v any) error {
+	st, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !st.Mode().IsRegular() || st.Size() > secMaxFile {
+		return fmt.Errorf("%s: not a regular file under %d bytes", filepath.Base(path), secMaxFile)
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -246,6 +258,9 @@ func decodeStrict(path string, v any) error {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		return fmt.Errorf("%s: %w", filepath.Base(path), err)
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return fmt.Errorf("%s: data after the document", filepath.Base(path))
 	}
 	return nil
 }

@@ -224,6 +224,17 @@ func TestRunPublishesTheSECSnapshotOrLeavesItOut(t *testing.T) {
 			b, _ := os.ReadFile(filepath.Join(dir, "AAPL.json"))
 			os.WriteFile(filepath.Join(dir, "AAPL.json"), []byte(strings.Replace(string(b), `"10-Q"`, `"8-K"`, 1)), 0o644)
 		},
+		"trailing data": func(dir string) {
+			secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z")
+			f, _ := os.OpenFile(filepath.Join(dir, "AAPL.json"), os.O_APPEND|os.O_WRONLY, 0)
+			f.WriteString(`{"v":1}`)
+			f.Close()
+		},
+		"too big": func(dir string) {
+			secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z")
+			b, _ := os.ReadFile(filepath.Join(dir, "AAPL.json"))
+			os.WriteFile(filepath.Join(dir, "AAPL.json"), append(b, []byte(strings.Repeat(" ", 300<<10))...), 0o644)
+		},
 		"extra field": func(dir string) {
 			secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z")
 			b, _ := os.ReadFile(filepath.Join(dir, "AAPL.json"))
