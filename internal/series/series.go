@@ -8,11 +8,14 @@
 //     the previous session) of 10x or more either way, within 5% of a ratio
 //     companies use (10, 12, 15, 20, 25, ...), is a split: no real stock
 //     moves that much overnight.
-//   - A gap of 30% or more that is within 8% of a common ratio (2, 3, 1/2,
-//     3/2, ...) is a split only if that day's IEX dollar volume is at most 5x
-//     its usual level. A split leaves the dollar value traded about the same;
-//     a real move of that size comes with a burst of trading (the spike's
-//     false alarms ran 10x to 50x, the real splits 0.1x to 3.8x).
+//   - A gap of 30% or more that is within 8% of a common whole-number ratio
+//     (2, 3, 1/2, 1/3, ...) is a split only if that day's IEX dollar volume
+//     is at most 2.5x its usual level since the last break. A split leaves
+//     the dollar value traded about the same; a real move of that size comes
+//     with a burst of trading (the spike's false alarms ran 10x to 50x, the
+//     real splits 0.1x to 3.8x).
+//   - A -33% gap at normal volume could be a 3-for-2 split or an earnings
+//     drop: it is never adjusted, the history is cut there instead.
 //   - Any other overnight gap of 40% or more, and any stretch of more than 20
 //     sessions without an IEX trade (a delisting, a ticker reused by another
 //     company), is a break: the history starts again after it.
@@ -219,7 +222,7 @@ func Build(days []Day, reviews []Review, generatedAt time.Time) (map[string]*Fil
 			if first == "" {
 				first = s.date
 			}
-			f.Bars = append(f.Bars, [7]float64{dateNum(s.date), round4(s.o), round4(s.h), round4(s.l), round4(s.c), math.Round(s.v), round4(s.pv / s.v)})
+			f.Bars = append(f.Bars, [7]float64{dateNum(s.date), round4(s.o), round4(s.h), round4(s.l), round4(s.c), publishedVolume(s.v), round4(s.pv / s.v)})
 		}
 		// Only the events that shaped the bars served: a split adjusts the
 		// bars before it, so it counts only after the first one; the break
@@ -312,7 +315,7 @@ func events(sym string, ss []session, review map[string]Review, used map[string]
 			start = i
 			continue
 		}
-		prior, havePrior := priorNotional(ss[:i])
+		prior, havePrior := priorNotional(ss[start:i])
 		if newShares, oldShares, ok := detectSplit(gap, b.pv, prior, havePrior); ok {
 			splits = append(splits, Split{Date: b.date, New: newShares, Old: oldShares, How: "detected"})
 			continue
@@ -350,6 +353,24 @@ func reviewMatchesGap(r Review, gap float64) error {
 	return nil
 }
 
+// publishedVolume rounds a session's split-adjusted share volume to whole
+// shares, except under one share: after a large reverse split, an old
+// session's adjusted volume can be a fraction of a share, and rounding it to
+// 0 made the app (and the preview check, internal/og) reject the whole file.
+// The fraction is kept as is (both accept any positive volume): rounding it
+// up to 1 would overstate that session's weight in volume averages and
+// anchored VWAPs.
+func publishedVolume(v float64) float64 {
+	if r := math.Round(v); r >= 1 {
+		return r
+	}
+	return v
+}
+
+// priorNotional takes only the sessions since the last break (the caller
+// passes ss[start:i]): a ticker reused by another company, or a history
+// cut at a jump, must not lend its old trading level to the new one's
+// split check.
 func priorNotional(before []session) (float64, bool) {
 	if len(before) > SplitVolumeSessions {
 		before = before[len(before)-SplitVolumeSessions:]
@@ -428,9 +449,13 @@ func detectSplit(gap, dayNotional float64, prior float64, havePrior bool) (int, 
 // adjusted: at normal dollar volume a -33% gap can as easily be an earnings
 // drop as a split, and leaving a real split unadjusted puts a
 // false -33% step into the history. So the history is cut there instead.
+// With too little trading since the last break to judge the volume, a gap
+// of that shape is cut too: the cautious reading.
 func maybeThreeForTwo(gap, dayNotional, prior float64, havePrior bool) bool {
-	return gap <= 1-SplitGap && havePrior && prior > 0 && dayNotional <= ThreeForTwoVolume*prior &&
-		math.Abs(gap/(2.0/3.0)-1) <= SplitTolerance
+	if gap > 1-SplitGap || math.Abs(gap/(2.0/3.0)-1) > SplitTolerance {
+		return false
+	}
+	return !havePrior || prior <= 0 || dayNotional <= ThreeForTwoVolume*prior
 }
 
 // adjust divides every price before a split by its ratio (and multiplies the

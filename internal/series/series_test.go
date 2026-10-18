@@ -420,3 +420,71 @@ func TestReviewedEntriesMustFitTheGap(t *testing.T) {
 		t.Fatalf("breaks = %+v", f.Breaks)
 	}
 }
+
+// Issue #10: the split check compares with trading since the last break only.
+// A reused ticker's old, much busier company must not make a crash on heavy
+// trading (for the new company) look like a split.
+func TestPriorVolumeComesOnlyFromAfterTheBreak(t *testing.T) {
+	bs := make([]*bar, 0, 150)
+	for i := 0; i < 50; i++ {
+		bs = append(bs, &bar{10, 10, 50e6}) // the old company: $50M a day
+	}
+	for i := 0; i < 22; i++ {
+		bs = append(bs, nil) // a quiet stretch: the ticker is reused
+	}
+	for i := 0; i < 10; i++ {
+		bs = append(bs, &bar{100, 100, 1e6}) // the new company: $1M a day
+	}
+	bs = append(bs, &bar{52, 53, 10e6}) // -48% on 10x its own usual trading
+	for len(bs) < 150 {
+		bs = append(bs, &bar{53, 53, 1e6})
+	}
+	f := build(t, 150, map[string][]*bar{"REUSE": bs}, nil)["REUSE"]
+	if len(f.Splits) != 0 {
+		t.Fatalf("a crash was taken for a split: %+v", f.Splits)
+	}
+	if n := len(f.Breaks); n != 1 || f.Breaks[0].Kind != "jump" {
+		t.Fatalf("breaks = %+v", f.Breaks)
+	}
+}
+
+// Issue #10: right after a break there is too little trading to judge a
+// -33% gap, so it is cut, as at normal volume.
+func TestThreeForTwoShapedGapRightAfterABreakIsCut(t *testing.T) {
+	bs := steady(100, 10)
+	for i := 10; i < 32; i++ {
+		bs[i] = nil
+	}
+	bs[32] = &bar{150, 150, 1e6}
+	bs[33] = &bar{150, 150, 1e6}
+	for i := 34; i < 100; i++ {
+		bs[i] = &bar{100, 100, 1e6}
+	}
+	f := build(t, 100, map[string][]*bar{"NEW": bs}, nil)["NEW"]
+	if len(f.Splits) != 0 || len(f.Breaks) != 1 || f.Breaks[0].Kind != "jump" || len(f.Bars) != 66 {
+		t.Fatalf("splits %+v breaks %+v bars %d", f.Splits, f.Breaks, len(f.Bars))
+	}
+}
+
+// Issue #10: after a big reverse split, an old session's adjusted volume can
+// be under half a share. It is published as that fraction, never 0 (the app
+// rejects a file with a zero-volume bar) and never rounded up to 1.
+func TestTinyAdjustedVolumeIsNeverZero(t *testing.T) {
+	bs := make([]*bar, 30)
+	for i := range bs {
+		bs[i] = &bar{1, 1, 5} // 5 shares a day at $1
+	}
+	for i := 10; i < 30; i++ {
+		bs[i] = &bar{20, 20, 5e6} // 1-for-20: 5 old shares are 0.25 new ones
+	}
+	f := build(t, 30, map[string][]*bar{"TINY": bs}, nil)["TINY"]
+	if len(f.Splits) != 1 {
+		t.Fatalf("splits = %+v", f.Splits)
+	}
+	if v := f.Bars[0][5]; v != 0.25 {
+		t.Fatalf("first bar volume = %v, want 0.25", v)
+	}
+	if v := f.Bars[29][5]; v != float64(int64(5e6/20)) {
+		t.Fatalf("last bar volume = %v", v)
+	}
+}
