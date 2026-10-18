@@ -164,6 +164,20 @@ func TestRealCompanies(t *testing.T) {
 	if n := period(t, extractFile(t, "AEP").Quarters, "2023-09-30").NetIncome; n.Val != nil || n.Why != "check" {
 		t.Errorf("AEP Q3 2023 net income %+v", n)
 	}
+	// Northern Trust Q1 2024: servicing fees tagged as contract revenue, less
+	// than its net interest income plus noninterest income.
+	nullRevenue("NTRS", "q", "2024-03-31")
+	// Sun Communities 2023 and Alnylam 2025: the 10-K revised the nine months,
+	// so the year minus the 10-Q's nine months is not the fourth quarter.
+	for _, c := range [][2]string{{"SUI", "2023-12-31"}, {"ALNY", "2025-12-31"}} {
+		if n := period(t, extractFile(t, c[0]).Quarters, c[1]).NetIncome; n.Val != nil {
+			t.Errorf("%s Q4 net income %v", c[0], *n.Val)
+		}
+	}
+	// AEP Q3 2022: the second quarter's net income again, to the dollar.
+	if n := period(t, extractFile(t, "AEP").Quarters, "2022-09-30").NetIncome; n.Val != nil {
+		t.Errorf("AEP Q3 2022 net income %v", *n.Val)
+	}
 	// L3Harris: the year's total under Q4's dates, no year to check it against.
 	nullRevenue("LHX", "q", "2026-01-02")
 	// Playboy: a business reclassified mid-year, the nine months no longer the sum of the quarters.
@@ -402,6 +416,23 @@ func TestUnitSlipAgainstALaterFiling(t *testing.T) {
 	}
 	if val(t, period(t, f.Quarters, "2026-03-31").Revenue) != 12000 {
 		t.Error("2026 Q1")
+	}
+}
+
+func TestRepeatedQuarter(t *testing.T) {
+	f := extract(t, facts(
+		"NetIncomeLoss 2026-01-01 2026-03-31 516 2026-05-01 10-Q 0000000001-26-000001",
+		"NetIncomeLoss 2026-04-01 2026-06-30 516 2026-08-01 10-Q 0000000001-26-000002",
+		"Revenues 2026-01-01 2026-03-31 900 2026-05-01 10-Q 0000000001-26-000001",
+		"Revenues 2026-04-01 2026-06-30 950 2026-08-01 10-Q 0000000001-26-000002",
+	))
+	for _, p := range f.Quarters {
+		if p.NetIncome.Val != nil {
+			t.Errorf("%s repeated net income shown", p.End)
+		}
+		if p.Revenue.Val == nil {
+			t.Errorf("%s revenue lost", p.End)
+		}
 	}
 }
 
