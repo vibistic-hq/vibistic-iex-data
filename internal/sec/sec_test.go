@@ -68,17 +68,11 @@ func TestRealCompanies(t *testing.T) {
 		{"NVDA", "q", "2026-07-26", 96221e6, 59688e6, "rev", false},
 		// Cloudflare: losses stay negative.
 		{"NET", "q", "2025-12-31", 614507e3, -12077e3, "rfc", true},
-		// Berkshire: total Revenues, not the smaller contract-revenue line.
-		{"BRK", "y", "2025-12-31", 371444e6, 66968e6, "rev", false},
 		// JPMorgan: quarterly revenue only as net of interest expense; its Q4 from that concept.
 		{"JPM", "q", "2025-12-31", 45798e6, 13025e6, "rnie", true},
 		{"JPM", "q", "2026-06-30", 57347e6, 21155e6, "rnie", false},
 		// Alphabet Q1 2025: as first filed (contract revenue, 2025-04-25), not a later comparative.
 		{"GOOGL", "q", "2025-03-31", 90234e6, 34540e6, "rfc", false},
-		// BlackRock tags a smaller line as Revenues: the total is the larger contract revenue.
-		{"BLK", "y", "2024-12-31", 20407e6, 6369e6, "rfc", false},
-		// Better: net revenue, larger than what it tags as Revenues.
-		{"BETR", "y", "2024-12-31", 108488e3, -206301e3, "rnie", false},
 		// HF Sinclair and NiSource tag the year's total with Q4's dates: the computed Q4 instead.
 		{"DINO", "q", "2024-12-31", 6500e6, -213.5e6, "rfc", true},
 		{"NI", "q", "2025-12-31", 1887e6, 257.8e6, "rfc", true},
@@ -87,10 +81,6 @@ func TestRealCompanies(t *testing.T) {
 		{"COST", "q", "2026-08-30", 95720e6, 2998e6, "rfc", true},
 		// Kroger: a 16-week first quarter.
 		{"KR", "q", "2026-05-23", 46120e6, 903e6, "rfc", false},
-		// Plexus: the nine months under the year's concept (the other one is in thousands).
-		{"PLXS", "q", "2025-09-27", 1058.4e6, 51.429e6, "rfci", true},
-		// AST SpaceMobile: the 10-K's larger tag is not the total; the next 10-K's comparative picks the one that is.
-		{"ASTS", "y", "2024-12-31", 4.4e6, -300.08e6, "rev", false},
 	}
 	for _, c := range cases {
 		f := extractFile(t, c.name)
@@ -99,6 +89,10 @@ func TestRealCompanies(t *testing.T) {
 			ps = f.Years
 		}
 		p := period(t, ps, c.end)
+		if p.Revenue.Val == nil || p.NetIncome.Val == nil {
+			t.Errorf("%s %s: revenue %s / net income %s", c.name, c.end, p.Revenue.Why, p.NetIncome.Why)
+			continue
+		}
 		// Exact, or to the rounding the expected figure is written with (4 significant digits).
 		near := func(got, want float64) bool { return got == want || math.Abs(got-want) <= math.Abs(want)*5e-4 }
 		if got := val(t, p.Revenue); !near(got, c.revenue) {
@@ -130,29 +124,47 @@ func TestRealCompanies(t *testing.T) {
 	if len(f.Quarters) != MaxQuarters || len(f.Years) != MaxYears {
 		t.Errorf("NVDA: %d quarters, %d years", len(f.Quarters), len(f.Years))
 	}
-	nullRevenue := func(name, kind, end string) {
+	nullRevenueWhy := func(name, kind, end, why string) {
 		t.Helper()
 		f := extractFile(t, name)
 		ps := f.Quarters
 		if kind == "y" {
 			ps = f.Years
 		}
-		if r := period(t, ps, end).Revenue; r.Val != nil || r.Why != "check" {
-			t.Errorf("%s %s: %+v", name, end, r)
+		if r := period(t, ps, end).Revenue; r.Val != nil || r.Why != why {
+			t.Errorf("%s %s: %+v, want null (%s)", name, end, r, why)
 		}
 	}
+	nullRevenue := func(name, kind, end string) { t.Helper(); nullRevenueWhy(name, kind, end, "check") }
+	// Berkshire's Revenues and its (smaller) contract revenue, Republic Services'
+	// Revenues (counting intercompany sales) and contract revenue: two totals, neither shown.
+	nullRevenueWhy("BRK", "y", "2025-12-31", "conflict")
+	nullRevenueWhy("RSG", "y", "2024-12-31", "conflict")
+	// Better: Revenues and net revenue far apart; Plexus: its nine months' two
+	// concepts a thousand times apart, so no fourth quarter.
+	nullRevenueWhy("BETR", "y", "2024-12-31", "conflict")
+	nullRevenueWhy("PLXS", "q", "2025-09-27", "conflict")
+	// BlackRock's Revenues is smaller than its contract revenue (one should be part
+	// of the other): which is the total cannot be told, so neither is shown.
+	nullRevenueWhy("BLK", "y", "2024-12-31", "conflict")
+	// AST SpaceMobile's 2024 10-K: contract revenue above the figure that includes taxes.
+	nullRevenueWhy("ASTS", "y", "2024-12-31", "conflict")
 	// L3Harris: the year's total under Q4's dates, no year to check it against.
 	nullRevenue("LHX", "q", "2026-01-02")
 	// Playboy: a business reclassified mid-year, the nine months no longer the sum of the quarters.
 	nullRevenue("PLBY", "q", "2024-12-31")
 	// Better: a quarter restated to under a third of what was first filed.
 	nullRevenue("BETR", "q", "2023-09-30")
-	// TYGO: thousands tagged as dollars for years: none of its revenue is shown, net income is.
+	// TYGO: contract revenue in thousands tagged as dollars for 2022-2024, beside
+	// a right Revenues: those periods are not shown; 2025 on (Revenues only) is.
 	ty := extractFile(t, "TYGO")
 	for _, p := range append(ty.Quarters, ty.Years...) {
-		if p.Revenue.Val != nil {
+		if p.Revenue.Val != nil && (*p.Revenue.Val > 1e9 || p.End < "2025-01-01") {
 			t.Errorf("TYGO %s revenue shown: %v", p.End, *p.Revenue.Val)
 		}
+	}
+	if val(t, period(t, ty.Quarters, "2025-03-31").Revenue) != 18839e3 {
+		t.Error("TYGO Q1 2025")
 	}
 	if val(t, period(t, ty.Quarters, "2026-06-30").NetIncome) != 2174e3 {
 		t.Error("TYGO net income")
@@ -221,8 +233,8 @@ func TestAmbiguousAndPreference(t *testing.T) {
 		"Revenues 2026-01-01 2026-03-31 100 2026-05-01 10-Q 0000000001-26-000001",
 		"Revenues 2026-01-01 2026-03-31 101 2026-05-01 10-Q 0000000001-26-000002",
 		"NetIncomeLoss 2026-01-01 2026-03-31 7 2026-05-01 10-Q 0000000001-26-000001",
-		// Contract revenue and Revenues in one filing: Revenues is preferred.
-		"RevenueFromContractWithCustomerExcludingAssessedTax 2026-04-01 2026-06-30 80 2026-08-01 10-Q 0000000001-26-000004",
+		// Contract revenue and Revenues in one filing, equal: Revenues is preferred.
+		"RevenueFromContractWithCustomerExcludingAssessedTax 2026-04-01 2026-06-30 95 2026-08-01 10-Q 0000000001-26-000004",
 		"Revenues 2026-04-01 2026-06-30 95 2026-08-01 10-Q 0000000001-26-000004",
 	))
 	if f.Quarters[0].Revenue.Val != nil || f.Quarters[0].Revenue.Why != "ambiguous" || val(t, f.Quarters[0].NetIncome) != 7 {
@@ -230,6 +242,27 @@ func TestAmbiguousAndPreference(t *testing.T) {
 	}
 	if val(t, f.Quarters[1].Revenue) != 95 || f.Quarters[1].Revenue.C != "rev" {
 		t.Errorf("%+v", f.Quarters[1].Revenue)
+	}
+}
+
+func TestConflictingTotals(t *testing.T) {
+	// Two revenue concepts more than 1% apart in one filing: which is the total
+	// cannot be told, so neither is shown (owner's decision 2026-10-18).
+	f := extract(t, facts(
+		"RevenueFromContractWithCustomerExcludingAssessedTax 2026-04-01 2026-06-30 80 2026-08-01 10-Q 0000000001-26-000004",
+		"Revenues 2026-04-01 2026-06-30 95 2026-08-01 10-Q 0000000001-26-000004",
+		"NetIncomeLoss 2026-04-01 2026-06-30 9 2026-08-01 10-Q 0000000001-26-000004",
+	))
+	if r := f.Quarters[0].Revenue; r.Val != nil || r.Why != "conflict" || val(t, f.Quarters[0].NetIncome) != 9 {
+		t.Errorf("%+v", f.Quarters[0])
+	}
+	// Within 1%: the same figure, shown.
+	f = extract(t, facts(
+		"RevenueFromContractWithCustomerExcludingAssessedTax 2026-04-01 2026-06-30 99.5 2026-08-01 10-Q 0000000001-26-000004",
+		"Revenues 2026-04-01 2026-06-30 100 2026-08-01 10-Q 0000000001-26-000004",
+	))
+	if val(t, f.Quarters[0].Revenue) != 100 {
+		t.Error("near-equal concepts")
 	}
 }
 

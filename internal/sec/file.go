@@ -47,7 +47,7 @@ type Value struct {
 	Filed   string   `json:"filed,omitempty"`   // yyyy-mm-dd
 	Accn    string   `json:"accn,omitempty"`    // accession number of the filing
 	Derived *Derived `json:"derived,omitempty"` // a fourth quarter: the year minus nine months
-	Why     string   `json:"why,omitempty"`     // only when Val is null: none, ambiguous, check or negative
+	Why     string   `json:"why,omitempty"`     // only when Val is null: none, ambiguous, check, negative or conflict
 }
 
 // Derived names the two filings a fourth quarter is computed from.
@@ -64,15 +64,22 @@ type Source struct {
 // Concepts: code to us-gaap concept. Revenue concepts in order of preference:
 // the first one a filing reports for a period is used.
 var Concepts = map[string]string{
-	"rev":  "Revenues",
-	"rfc":  "RevenueFromContractWithCustomerExcludingAssessedTax",
-	"rfci": "RevenueFromContractWithCustomerIncludingAssessedTax",
-	"srn":  "SalesRevenueNet",
-	"rnie": "RevenuesNetOfInterestExpense", // banks' total net revenue
-	"ni":   "NetIncomeLoss",
+	"rev":   "Revenues",
+	"rfc":   "RevenueFromContractWithCustomerExcludingAssessedTax",
+	"rfci":  "RevenueFromContractWithCustomerIncludingAssessedTax",
+	"srn":   "SalesRevenueNet",
+	"rnie":  "RevenuesNetOfInterestExpense",            // banks' total net revenue
+	"rauor": "RegulatedAndUnregulatedOperatingRevenue", // utilities
+	"rern":  "RealEstateRevenueNet",                    // real estate companies
+	"ni":    "NetIncomeLoss",
 }
 
-var RevenueCodes = []string{"rev", "rfc", "rfci", "srn", "rnie"}
+var RevenueCodes = []string{"rev", "rfc", "rfci", "srn", "rnie", "rauor", "rern"}
+
+// Parts of revenue, never published: a figure smaller than one of them in
+// the same filing is not the total (a real estate company's contract revenue
+// leaves out its rents).
+var partConcepts = []string{"OperatingLeaseLeaseIncome", "OperatingLeasesIncomeStatementLeaseRevenue"}
 
 const (
 	MaxQuarters = 12
@@ -90,7 +97,7 @@ var (
 	symbolRe = regexp.MustCompile(`^[A-Z]{1,5}(\.[A-Z])?$`)
 	accnRe   = regexp.MustCompile(`^[0-9]{10}-[0-9]{2}-[0-9]{6}$`)
 	forms    = map[string]bool{"10-Q": true, "10-K": true, "10-KT": true}
-	whys     = map[string]bool{"none": true, "ambiguous": true, "check": true, "negative": true}
+	whys     = map[string]bool{"none": true, "ambiguous": true, "check": true, "negative": true, "conflict": true}
 )
 
 func parseDate(s string) (time.Time, error) {

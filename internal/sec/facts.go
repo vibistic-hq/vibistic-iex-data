@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -68,6 +69,7 @@ type metric struct {
 	revenue  bool
 	codes    []string // in order of preference among equal values
 	byPeriod map[span][]rec
+	parts    map[span][]rec // revenue only: parts of revenue (partConcepts)
 }
 
 // cand is one concept's value in a period's original filing(s).
@@ -97,9 +99,16 @@ func Extract(r io.Reader, symbol string, now time.Time) (*File, error) {
 	if err != nil {
 		return nil, err
 	}
-	rev := &metric{revenue: true, codes: RevenueCodes, byPeriod: map[span][]rec{}}
+	rev := &metric{revenue: true, codes: RevenueCodes, byPeriod: map[span][]rec{}, parts: map[span][]rec{}}
 	ni := &metric{codes: []string{"ni"}, byPeriod: map[span][]rec{}}
+	read := map[string]string{}
 	for code, concept := range Concepts {
+		read[code] = concept
+	}
+	for _, concept := range partConcepts {
+		read["part:"+concept] = concept
+	}
+	for code, concept := range read {
 		raw, ok := cf.Facts.USGAAP[concept]
 		if !ok {
 			continue
@@ -110,9 +119,12 @@ func Extract(r io.Reader, symbol string, now time.Time) (*File, error) {
 		if err := json.Unmarshal(raw, &c); err != nil {
 			return nil, fmt.Errorf("%s: %w", concept, err)
 		}
-		m := rev
-		if code == "ni" {
-			m = ni
+		m, into := rev, rev.byPeriod
+		switch {
+		case code == "ni":
+			m, into = ni, ni.byPeriod
+		case strings.HasPrefix(code, "part:"):
+			into = rev.parts
 		}
 		for _, f := range c.Units["USD"] {
 			if !forms[f.Form] || !accnRe.MatchString(f.Accn) || !finite(f.Val) {
@@ -132,7 +144,8 @@ func Extract(r io.Reader, symbol string, now time.Time) (*File, error) {
 				continue
 			}
 			sp := span{s, e}
-			m.byPeriod[sp] = append(m.byPeriod[sp], rec{code, s, e, k, f.Val, f.Accn, f.Form, f.Filed})
+			into[sp] = append(into[sp], rec{code, s, e, k, f.Val, f.Accn, f.Form, f.Filed})
+			_ = m
 		}
 	}
 	quarters := map[span]*Period{}
@@ -263,9 +276,8 @@ func (m *metric) original(sp span) []cand {
 	return out
 }
 
-// order sorts unambiguous candidates largest first (total revenue is the
-// largest top-line figure; some filers tag one line, not the total, as
-// Revenues), equal values by preference.
+// order sorts unambiguous candidates largest first, equal values by
+// preference.
 func order(cs []cand) []cand {
 	out := append([]cand{}, cs...)
 	sort.SliceStable(out, func(i, j int) bool { return out[i].r.val > out[j].r.val })
@@ -284,10 +296,29 @@ func (m *metric) pick(cs []cand) (*cand, string) {
 		}
 	}
 	c := order(cs)[0]
-	if m.revenue && c.r.val < 0 {
+	if !m.revenue {
+		return &c, ""
+	}
+	if c.r.val < 0 {
 		// A few filers report a negative revenue (returns, or a fund's
 		// losses under Revenues): not a revenue figure to show.
 		return nil, "negative"
+	}
+	// Every revenue concept the filing reports for the period must agree
+	// (within 1%): when two differ, which one is the total on the income
+	// statement cannot be told from these facts (Berkshire's and Chevron's
+	// larger figure is the total, Republic Services' counts intercompany
+	// sales), so none is shown (owner's decision, 2026-10-18).
+	for _, x := range cs {
+		if x.r.val > 0 && math.Abs(x.r.val-c.r.val) > 0.01*c.r.val {
+			return nil, "conflict"
+		}
+	}
+	// Nor can a total be smaller than a part of it in the same filing.
+	for _, p := range m.parts[span{c.r.start, c.r.end}] {
+		if p.filed == c.r.filed && p.val > c.r.val*1.01 {
+			return nil, "check"
+		}
 	}
 	return &c, ""
 }
@@ -387,11 +418,14 @@ func (m *metric) derive(yc, nc []cand, n span) (Value, bool) {
 			return Value{Why: "ambiguous"}, false
 		}
 	}
-	if len(yc) == 0 || len(nc) == 0 {
-		return Value{Why: "none"}, false
+	top, why := m.pick(yc)
+	if top == nil {
+		return Value{Why: why}, false
 	}
-	top := order(yc)[0]
-	nine := order(nc)[0]
+	nine, why := m.pick(nc)
+	if nine == nil {
+		return Value{Why: why}, false
+	}
 	var year *cand
 	for i := range yc {
 		if yc[i].code == nine.code && math.Abs(yc[i].r.val-top.r.val) <= 1e-4*math.Abs(top.r.val) {
@@ -400,6 +434,15 @@ func (m *metric) derive(yc, nc []cand, n span) (Value, bool) {
 	}
 	if year == nil {
 		return Value{Why: "none"}, false
+	}
+	// Nine months the company later restated (shown again a year on, in the
+	// next third-quarter 10-Q, more than 1% off): the year's 10-K may already
+	// be on the new basis (PPG's divested business), so the difference would
+	// not be a quarter.
+	for _, x := range m.byPeriod[n] {
+		if x.code == nine.code && x.filed > nine.r.filed && math.Abs(x.val-nine.r.val) > 0.01*math.Abs(nine.r.val) {
+			return Value{Why: "check"}, false
+		}
 	}
 	// The nine months as filed before the year (in a 10-Q of that year), not
 	// a comparative in a later 10-Q on a newer basis.
@@ -498,22 +541,35 @@ func checkYears(quarters, years map[span]*Period) {
 }
 
 // checkLater checks each revenue figure against the same period as the next
-// year's filing shows it (the `prev` of the row a year later, a figure the
-// company filed again): a restatement moves a figure a little, while a
+// year's filing shows it under the same concept (a figure the company filed
+// again): a restatement moves a figure a little, while a
 // scaling slip (thousands tagged as dollars) or a partial line tagged as the
-// total does not survive the comparison. When they disagree by more than 10%
-// and another concept of the original filing matches the later figure, that
-// one is used; otherwise a figure off by more than 3 times is not shown, and
+// total does not survive the comparison. A figure off by more than 3 times
+// is not shown, and
 // one off by about a thousand or a million times (thousands tagged as
 // dollars) is reported as a slip when the period is one shown (ending on or
 // after `since`). The later figures are read before any row changes.
 func checkLater(rev *metric, rows map[span]*Period, since time.Time) bool {
+	// The later figure: in the original filing of the period a year on,
+	// that filing's year-earlier value under this figure's concept (read
+	// before any row changes, whether or not the later period is shown).
 	later := map[span]float64{}
-	for sp := range rows {
-		for sp2, p2 := range rows {
+	for sp, p := range rows {
+		if p.Revenue.Val == nil {
+			continue
+		}
+		for sp2, recs := range rev.byPeriod {
 			gap := int(sp2.end.Sub(sp.end).Hours() / 24)
-			if gap >= 351 && gap <= 379 && p2.Revenue.Prev != nil && *p2.Revenue.Prev > 0 {
-				later[sp] = *p2.Revenue.Prev
+			if gap < 351 || gap > 379 || recs[0].kind != kindOf(days(sp.start, sp.end)) {
+				continue
+			}
+			for _, c := range rev.original(sp2) {
+				if c.code != p.Revenue.C || c.ambiguous {
+					continue
+				}
+				if l, ok := rev.prev(c.r); ok && l > 0 {
+					later[sp] = l
+				}
 			}
 		}
 	}
@@ -525,23 +581,10 @@ func checkLater(rev *metric, rows map[span]*Period, since time.Time) bool {
 		if v.Val == nil || *v.Val <= 0 || !ok || off(*v.Val, l) <= 1.1 {
 			continue
 		}
-		switched := false
-		if v.Derived == nil {
-			for _, c := range rev.original(sp) {
-				if !c.ambiguous && c.r.val > 0 && off(c.r.val, l) <= 1.01 {
-					p.Revenue = rev.value(&c, "")
-					switched = true
-					break
-				}
-			}
-		}
 		switch {
 		case scaled(off(*v.Val, l)) && !sp.end.Before(since):
-			// Thousands (or millions) tagged as dollars in a period shown,
-			// even if another concept had it right.
+			// Thousands (or millions) tagged as dollars in a period shown.
 			slip = true
-		case switched:
-			// Another concept of the same filing matches the later figure.
 		case off(*v.Val, l) > 3:
 			// A large restatement or a partial line: this figure is not shown.
 			p.Revenue = Value{Why: "check"}
