@@ -30,6 +30,6 @@ jobs:
       - name: Scripts parse
         run: for f in scripts/*.sh; do bash -n "$f"; done
       - name: process-day.sh, session-days.sh and fetch-sec-snapshot.sh
-        run: bash scripts/test-process-day.sh && bash scripts/test-session-days.sh && bash scripts/test-fetch-sec-snapshot.sh && bash scripts/test-fetch-archive.sh
+        run: bash scripts/test-process-day.sh && bash scripts/test-session-days.sh && bash scripts/test-fetch-sec-snapshot.sh && bash scripts/test-fetch-earnings.sh && bash scripts/test-upload-earnings.sh && bash scripts/test-fetch-archive.sh
       - name: No licensed figures
         run: bash scripts/test-check-no-licensed-figures.sh && bash scripts/check-no-licensed-figures.sh

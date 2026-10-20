@@ -49,10 +49,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: scripts/fetch-sec-snapshot.sh "$RUNNER_TEMP/sec"
+      # Likewise: no estimates, or bad ones, only leave v1/earnings.json out.
+      - name: Fetch the earnings estimates
+        timeout-minutes: 5
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/fetch-earnings.sh "$RUNNER_TEMP/earnings.json"
       - name: Build
         run: |
           sec=()
           [ -f "$RUNNER_TEMP/sec/snapshot.json" ] && sec=(-sec "$RUNNER_TEMP/sec")
+          [ -f "$RUNNER_TEMP/earnings.json" ] && sec+=(-earnings "$RUNNER_TEMP/earnings.json")
           go run ./cmd/build -days days -reviewed splits-reviewed.json "${sec[@]}" -out site
       - name: Check size
         run: scripts/check-site-size.sh site

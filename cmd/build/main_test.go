@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/vibistic-hq/vibistic-iex-data/internal/day"
+	"github.com/vibistic-hq/vibistic-iex-data/internal/earnings"
 	"github.com/vibistic-hq/vibistic-iex-data/internal/og"
 	"github.com/vibistic-hq/vibistic-iex-data/internal/sec"
 	"github.com/vibistic-hq/vibistic-iex-data/internal/series"
@@ -59,7 +60,7 @@ func TestRunBuildsTheSite(t *testing.T) {
 	reviewed := filepath.Join(tmp, "reviewed.json")
 	os.WriteFile(reviewed, []byte("[]"), 0o644)
 	out := filepath.Join(tmp, "site")
-	if err := run(days, reviewed, "", out, time.Date(2026, 10, 10, 7, 0, 0, 0, time.UTC)); err != nil {
+	if err := run(days, reviewed, "", "", out, time.Date(2026, 10, 10, 7, 0, 0, 0, time.UTC)); err != nil {
 		t.Fatal(err)
 	}
 	var f series.File
@@ -96,7 +97,7 @@ func TestRunBuildsTheSite(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(out, "v1", "s", "ODD.json")); err != nil {
 		t.Fatal(err)
 	}
-	if err := run(days, reviewed, "", out, time.Now()); err == nil {
+	if err := run(days, reviewed, "", "", out, time.Now()); err == nil {
 		t.Fatal("must refuse to overwrite an existing site")
 	}
 }
@@ -114,7 +115,7 @@ func TestRunSkipsDaysThatMissPartOfTheSession(t *testing.T) {
 	reviewed := filepath.Join(tmp, "reviewed.json")
 	os.WriteFile(reviewed, []byte("[]"), 0o644)
 	out := filepath.Join(tmp, "site")
-	if err := run(days, reviewed, "", out, time.Date(2024, 12, 27, 7, 0, 0, 0, time.UTC)); err != nil {
+	if err := run(days, reviewed, "", "", out, time.Date(2024, 12, 27, 7, 0, 0, 0, time.UTC)); err != nil {
 		t.Fatal(err)
 	}
 	var f series.File
@@ -139,7 +140,7 @@ func TestRunFailsWhenEveryDayIsIncomplete(t *testing.T) {
 	writeSession(t, tmp, "2024-12-23", 11, 50)
 	reviewed := filepath.Join(tmp, "reviewed.json")
 	os.WriteFile(reviewed, []byte("[]"), 0o644)
-	if err := run(tmp, reviewed, "", filepath.Join(tmp, "site"), time.Now()); err == nil {
+	if err := run(tmp, reviewed, "", "", filepath.Join(tmp, "site"), time.Now()); err == nil {
 		t.Fatal("want an error with no complete days")
 	}
 }
@@ -150,7 +151,7 @@ func TestRunRejectsMisnamedDayFiles(t *testing.T) {
 	os.Rename(filepath.Join(tmp, "20261009.jsonl.gz"), filepath.Join(tmp, "20261008.jsonl.gz"))
 	reviewed := filepath.Join(tmp, "reviewed.json")
 	os.WriteFile(reviewed, []byte("[]"), 0o644)
-	if err := run(tmp, reviewed, "", filepath.Join(tmp, "site"), time.Now()); err == nil {
+	if err := run(tmp, reviewed, "", "", filepath.Join(tmp, "site"), time.Now()); err == nil {
 		t.Fatal("want an error")
 	}
 }
@@ -192,7 +193,7 @@ func TestRunPublishesTheSECSnapshotOrLeavesItOut(t *testing.T) {
 		secDir := filepath.Join(tmp, "sec")
 		snapshot(secDir)
 		out := filepath.Join(tmp, "site")
-		if err := run(days, reviewed, secDir, out, when); err != nil {
+		if err := run(days, reviewed, secDir, "", out, when); err != nil {
 			t.Fatal(err)
 		}
 		// The IEX files are there whatever happened to the SEC snapshot.
@@ -203,6 +204,9 @@ func TestRunPublishesTheSECSnapshotOrLeavesItOut(t *testing.T) {
 	}
 	t.Run("good", func(t *testing.T) {
 		out := build(t, func(dir string) { secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z") })
+		if _, err := os.Stat(filepath.Join(out, "v1", "earnings.json")); !os.IsNotExist(err) {
+			t.Fatal("no -earnings, no earnings file")
+		}
 		if _, err := os.Stat(filepath.Join(out, "v1", "sec", "AAPL.json")); err != nil {
 			t.Fatal(err)
 		}
@@ -248,6 +252,89 @@ func TestRunPublishesTheSECSnapshotOrLeavesItOut(t *testing.T) {
 			}
 			m, _ := os.ReadFile(filepath.Join(out, "v1", "manifest.json"))
 			if strings.Contains(string(m), `"sec"`) {
+				t.Fatalf("manifest = %s", m)
+			}
+		})
+	}
+}
+
+// earningsFile writes an earningsbuild-shaped file with n symbols.
+func earningsFile(t *testing.T, path, generated string, n int) {
+	t.Helper()
+	f := earnings.File{V: 1, Source: "SEC", GeneratedAt: generated, Today: "2026-10-09", AsOf: "2026-10-08", Symbols: map[string]earnings.Entry{}}
+	for i := 0; i < n; i++ {
+		sym := string(rune('A'+i/676%26)) + string(rune('A'+i/26%26)) + string(rune('A'+i%26))
+		f.Symbols[sym] = earnings.Entry{CIK: int64(1000 + i), Next: "2026-10-29", Last: "2026-07-30", Basis: "2025-10-30"}
+	}
+	b, _ := json.Marshal(f)
+	os.WriteFile(path, b, 0o644)
+}
+
+func TestRunPublishesTheEarningsFileOrLeavesItOut(t *testing.T) {
+	when := time.Date(2026, 10, 10, 7, 0, 0, 0, time.UTC)
+	build := func(t *testing.T, write func(path string)) string {
+		tmp := t.TempDir()
+		days := filepath.Join(tmp, "days")
+		os.Mkdir(days, 0o755)
+		aapl := tops.Summary{Symbol: "AAPL", Open: 100_0000, High: 101_0000, Low: 99_0000, Close: 100_5000, Volume: 10_000, Notional: 1_005_000, Trades: 10, LotTrades: 10}
+		writeDay(t, days, "2026-10-09", aapl)
+		reviewed := filepath.Join(tmp, "reviewed.json")
+		os.WriteFile(reviewed, []byte("[]"), 0o644)
+		secDir := filepath.Join(tmp, "sec")
+		secSnapshot(t, secDir, "AAPL", "2026-10-09T09:30:00Z")
+		path := filepath.Join(tmp, "earnings.json")
+		write(path)
+		out := filepath.Join(tmp, "site")
+		if err := run(days, reviewed, secDir, path, out, when); err != nil {
+			t.Fatal(err)
+		}
+		// The IEX and SEC files are there whatever happened to the estimates.
+		for _, p := range []string{"s/AAPL.json", "sec/AAPL.json"} {
+			if _, err := os.Stat(filepath.Join(out, "v1", p)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return out
+	}
+	t.Run("good", func(t *testing.T) {
+		out := build(t, func(p string) { earningsFile(t, p, "2026-10-09T09:30:00Z", earnings.MinSymbols) })
+		var f earnings.File
+		b, err := os.ReadFile(filepath.Join(out, "v1", "earnings.json"))
+		if err != nil || json.Unmarshal(b, &f) != nil || len(f.Symbols) != earnings.MinSymbols {
+			t.Fatalf("%v %d", err, len(f.Symbols))
+		}
+		m, _ := os.ReadFile(filepath.Join(out, "v1", "manifest.json"))
+		if !strings.Contains(string(m), `"earnings":{"asOf":"2026-10-08","generatedAt":"2026-10-09T09:30:00Z","source":"SEC","symbols":1500}`) {
+			t.Fatalf("manifest = %s", m)
+		}
+	})
+	for name, write := range map[string]func(path string){
+		"missing":     func(p string) {},
+		"stale":       func(p string) { earningsFile(t, p, "2026-09-20T09:30:00Z", earnings.MinSymbols) },
+		"few symbols": func(p string) { earningsFile(t, p, "2026-10-09T09:30:00Z", earnings.MinSymbols-1) },
+		"invalid": func(p string) {
+			earningsFile(t, p, "2026-10-09T09:30:00Z", earnings.MinSymbols)
+			b, _ := os.ReadFile(p)
+			os.WriteFile(p, []byte(strings.Replace(string(b), `"next":"2026-10-29"`, `"next":"2026-10-30"`, 1)), 0o644)
+		},
+		"extra field": func(p string) {
+			earningsFile(t, p, "2026-10-09T09:30:00Z", earnings.MinSymbols)
+			b, _ := os.ReadFile(p)
+			os.WriteFile(p, []byte(strings.Replace(string(b), `{"v":1`, `{"note":"<b>x</b>","v":1`, 1)), 0o644)
+		},
+		"too big": func(p string) {
+			earningsFile(t, p, "2026-10-09T09:30:00Z", earnings.MinSymbols)
+			b, _ := os.ReadFile(p)
+			os.WriteFile(p, append(b, []byte(strings.Repeat(" ", 3<<20))...), 0o644)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := build(t, write)
+			if _, err := os.Stat(filepath.Join(out, "v1", "earnings.json")); !os.IsNotExist(err) {
+				t.Fatalf("v1/earnings.json published: %v", err)
+			}
+			m, _ := os.ReadFile(filepath.Join(out, "v1", "manifest.json"))
+			if strings.Contains(string(m), `"earnings"`) || !strings.Contains(string(m), `"sec"`) {
 				t.Fatalf("manifest = %s", m)
 			}
 		})

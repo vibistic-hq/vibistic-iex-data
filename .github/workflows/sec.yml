@@ -54,8 +54,48 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: scripts/upload-sec-snapshot.sh sec
 
+  # Estimated next earnings dates (issue #12), from SEC's bulk submissions.zip
+  # (every company's filings index, also rebuilt nightly). Its own job and
+  # release: a failure here never holds back the revenue snapshot, nor the
+  # other way round.
+  earnings:
+    if: github.repository == 'vibistic-hq/vibistic-iex-data' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write # release assets only
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Test
+        run: go test ./internal/earnings ./internal/sec ./cmd/earningsbuild
+      - name: Download from SEC
+        env:
+          UA: Vibistic Stocks parag@vibistic.com
+        run: |
+          mkdir -p dl
+          curl -fsS --retry 3 --retry-delay 60 --max-time 1800 --max-filesize 4000000000 -A "$UA" \
+            -o dl/submissions.zip https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip
+          sleep 1
+          curl -fsS --retry 3 --retry-delay 60 --max-time 120 --max-filesize 20000000 -A "$UA" \
+            -o dl/tickers.json https://www.sec.gov/files/company_tickers_exchange.json
+          ls -l dl
+      - name: Build
+        run: go run ./cmd/earningsbuild -submissions dl/submissions.zip -tickers dl/tickers.json -out earnings.json
+      - name: Keep the estimates
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/upload-earnings.sh earnings.json
+
+  # Publishes when either job produced something new.
   publish:
-    needs: snapshot
+    needs: [snapshot, earnings]
+    if: always() && (needs.snapshot.result == 'success' || needs.earnings.result == 'success')
     permissions:
       contents: read
       pages: write
