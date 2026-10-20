@@ -261,7 +261,8 @@ func Validate(f *File) error {
 	seen := map[string]bool{}
 	n := len(f.Symbols)
 	for why, syms := range f.NoEstimate {
-		if !knownWhy(why) {
+		// null decodes to a nil slice; the app wants a list.
+		if !knownWhy(why) || syms == nil {
 			return fmt.Errorf("noEstimate: reason %q", why)
 		}
 		for _, s := range syms {
