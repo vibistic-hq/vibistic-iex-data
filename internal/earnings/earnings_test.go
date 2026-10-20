@@ -302,6 +302,7 @@ func TestValidateNoEstimate(t *testing.T) {
 		"twice":            {WhyFew: {"SPCX"}, WhyStale: {"SPCX"}},
 		"twice in one":     {WhyFew: {"SPCX", "SPCX"}},
 		"also an estimate": {WhyFew: {"AAPL"}},
+		"null list":        {WhyFew: nil},
 	} {
 		f := goodFile()
 		f.NoEstimate = ne
