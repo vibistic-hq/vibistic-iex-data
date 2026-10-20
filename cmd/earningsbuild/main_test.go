@@ -136,30 +136,49 @@ func TestRunRefusesStaleFilings(t *testing.T) {
 	}
 }
 
-// A page whose last filing date is missing or bad, or a page listed twice,
-// skips the company: a page left out must be known to be too old.
-func TestRunSkipsBadPageLists(t *testing.T) {
-	minSymbols = 1
-	defer func() { minSymbols = earnings.MinSymbols }()
+// A page whose last filing date is missing or bad, a page listed twice, or
+// pages over the company's byte budget: the company's history is an error
+// (skipped), never read without them.
+func TestCompanyReleasesRejectsBadPageLists(t *testing.T) {
 	recent := releases("2025-07-31", "2025-10-30", "2026-01-29", "2026-04-30", "2026-07-30")
-	page, _ := json.Marshal(releases("2026-10-13"))
+	page, _ := json.Marshal(releases("2025-04-30"))
+	pageName := "CIK0000320193-submissions-001.json"
+	read := func(t *testing.T, pages ...map[string]string) error {
+		z, _, _ := fixture(t, map[string][]byte{"CIK0000320193.json": sub(320193, recent, pages...), pageName: page})
+		zr, err := zip.OpenReader(z)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer zr.Close()
+		entries := map[string]*zip.File{}
+		for _, e := range zr.File {
+			entries[e.Name] = e
+		}
+		_, _, err = companyReleases(entries["CIK0000320193.json"], entries, 320193, earnings.NewYorkDay(now))
+		return err
+	}
+	if err := read(t, map[string]string{"name": pageName, "filingTo": "2025-04-30"}); err != nil {
+		t.Fatalf("a good page: %v", err)
+	}
 	for name, pages := range map[string][]map[string]string{
-		"no filingTo":  {{"name": "CIK0000320193-submissions-001.json"}},
-		"bad filingTo": {{"name": "CIK0000320193-submissions-001.json", "filingTo": "2026-13-01"}},
-		"twice":        {{"name": "CIK0000320193-submissions-001.json", "filingTo": "2026-10-13"}, {"name": "CIK0000320193-submissions-001.json", "filingTo": "2026-10-13"}},
+		"no filingTo":  {{"name": pageName}},
+		"bad filingTo": {{"name": pageName, "filingTo": "2026-13-01"}},
+		"twice":        {{"name": pageName, "filingTo": "2025-04-30"}, {"name": pageName, "filingTo": "2025-04-30"}},
+		"other cik":    {{"name": "CIK0000019617-submissions-001.json", "filingTo": "2025-04-30"}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			z, tk, r := fixture(t, map[string][]byte{"CIK0000320193.json": sub(320193, recent, pages...), "CIK0000320193-submissions-001.json": page})
-			out := filepath.Join(t.TempDir(), "earnings.json")
-			if err := run(z, tk, r, out, now); err != nil {
-				t.Fatal(err)
-			}
-			b, _ := os.ReadFile(out)
-			if strings.Contains(string(b), "AAPL") {
-				t.Fatal("AAPL got an estimate")
+			if err := read(t, pages...); err == nil {
+				t.Fatal("want an error")
 			}
 		})
 	}
+	t.Run("over budget", func(t *testing.T) {
+		maxCompany = uint64(len(page) - 1)
+		defer func() { maxCompany = 512 << 20 }()
+		if err := read(t, map[string]string{"name": pageName, "filingTo": "2025-04-30"}); err == nil {
+			t.Fatal("want an error")
+		}
+	})
 }
 
 func TestRunSkipsUnalignedColumns(t *testing.T) {

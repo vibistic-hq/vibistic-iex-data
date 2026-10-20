@@ -27,10 +27,10 @@ import (
 // The largest company's filings index is a few tens of MB; the pages one
 // company's history needs together, a few times that (JPM: about 25 pages of
 // 2,000 filings in 800 days).
-const (
-	maxEntry   = 256 << 20
-	maxCompany = 512 << 20
-)
+const maxEntry = 256 << 20
+
+// Lowered by the tests.
+var maxCompany uint64 = 512 << 20
 
 // Lowered by the tests.
 var minSymbols = earnings.MinSymbols
