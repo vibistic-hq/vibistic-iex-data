@@ -2,9 +2,11 @@
 // v1/s/{SYMBOL}.json for every symbol, v1/og/{SYMBOL}.png (the preview image
 // of Vibistic Stocks share links) for every covered symbol, v1/manifest.json
 // and an index page. With -sec, it also publishes a checked SEC snapshot
-// (cmd/secbuild) as v1/sec/{SYMBOL}.json (issue #8).
+// (cmd/secbuild) as v1/sec/{SYMBOL}.json (issue #8), and with -earnings a
+// checked earnings estimates file (cmd/earningsbuild) as v1/earnings.json
+// (issue #12).
 //
-//	build -days days/ -reviewed splits-reviewed.json [-sec sec/] -out site/
+//	build -days days/ -reviewed splits-reviewed.json [-sec sec/] [-earnings earnings.json] -out site/
 package main
 
 import (
@@ -24,6 +26,7 @@ import (
 	"time"
 
 	"github.com/vibistic-hq/vibistic-iex-data/internal/day"
+	"github.com/vibistic-hq/vibistic-iex-data/internal/earnings"
 	"github.com/vibistic-hq/vibistic-iex-data/internal/og"
 	"github.com/vibistic-hq/vibistic-iex-data/internal/sec"
 	"github.com/vibistic-hq/vibistic-iex-data/internal/series"
@@ -34,6 +37,7 @@ func main() {
 	reviewed := flag.String("reviewed", "splits-reviewed.json", "reviewed splits and breaks")
 	out := flag.String("out", "site", "output directory (created; must not exist)")
 	secDir := flag.String("sec", "", "SEC snapshot directory from secbuild (optional)")
+	earningsPath := flag.String("earnings", "", "earnings estimates file from earningsbuild (optional)")
 	validate := flag.Bool("validate", false, "only check the reviewed file")
 	flag.Parse()
 	if *validate {
@@ -43,13 +47,13 @@ func main() {
 		}
 		return
 	}
-	if err := run(*daysDir, *reviewed, *secDir, *out, time.Now()); err != nil {
+	if err := run(*daysDir, *reviewed, *secDir, *earningsPath, *out, time.Now()); err != nil {
 		fmt.Fprintln(os.Stderr, "build:", err)
 		os.Exit(1)
 	}
 }
 
-func run(daysDir, reviewedPath, secDir, out string, now time.Time) error {
+func run(daysDir, reviewedPath, secDir, earningsPath, out string, now time.Time) error {
 	reviews, err := readReviews(reviewedPath)
 	if err != nil {
 		return err
@@ -106,6 +110,16 @@ func run(daysDir, reviewedPath, secDir, out string, now time.Time) error {
 			os.RemoveAll(filepath.Join(out, "v1", "sec"))
 		} else {
 			manifest["sec"] = info
+		}
+	}
+	// Nor on the earnings estimates, which are left out alone.
+	if earningsPath != "" {
+		info, err := copyEarnings(earningsPath, filepath.Join(out, "v1", "earnings.json"), now)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "build: earnings estimates left out: %v\n", err)
+			os.Remove(filepath.Join(out, "v1", "earnings.json"))
+		} else {
+			manifest["earnings"] = info
 		}
 	}
 	if err := writeJSON(filepath.Join(out, "v1", "manifest.json"), manifest); err != nil {
@@ -193,7 +207,7 @@ func copySEC(dir, dst string, now time.Time) (map[string]any, error) {
 		GeneratedAt string `json:"generatedAt"`
 		Files       int    `json:"files"`
 	}
-	if err := decodeStrict(filepath.Join(dir, "snapshot.json"), &snap); err != nil {
+	if err := decodeStrict(filepath.Join(dir, "snapshot.json"), &snap, secMaxFile); err != nil {
 		return nil, err
 	}
 	gen, err := time.Parse(time.RFC3339, snap.GeneratedAt)
@@ -217,7 +231,7 @@ func copySEC(dir, dst string, now time.Time) (map[string]any, error) {
 			continue
 		}
 		var f sec.File
-		if err := decodeStrict(p, &f); err != nil {
+		if err := decodeStrict(p, &f, secMaxFile); err != nil {
 			return nil, err
 		}
 		if err := sec.Validate(&f); err != nil {
@@ -240,15 +254,42 @@ func copySEC(dir, dst string, now time.Time) (map[string]any, error) {
 // A symbol's SEC file is a few KB; anything near this is not one.
 const secMaxFile = 256 << 10
 
-// decodeStrict reads one small JSON document: known fields only, nothing
-// after it.
-func decodeStrict(path string, v any) error {
+// The earnings file is a few hundred KB (the app refuses over 2 MB).
+const earningsMaxFile = 2 << 20
+
+// copyEarnings checks the earnings file again (strict decoding,
+// earnings.Validate, at least earnings.MinSymbols, no older than an SEC
+// snapshot may be) and writes it to dst.
+func copyEarnings(path, dst string, now time.Time) (map[string]any, error) {
+	var f earnings.File
+	if err := decodeStrict(path, &f, earningsMaxFile); err != nil {
+		return nil, err
+	}
+	if err := earnings.Validate(&f); err != nil {
+		return nil, err
+	}
+	gen, _ := time.Parse(time.RFC3339, f.GeneratedAt)
+	if age := now.Sub(gen); age > secMaxAge || age < -time.Hour {
+		return nil, fmt.Errorf("estimates from %s are too old or in the future", f.GeneratedAt)
+	}
+	if len(f.Symbols) < earnings.MinSymbols {
+		return nil, fmt.Errorf("only %d symbols", len(f.Symbols))
+	}
+	if err := writeJSON(dst, &f); err != nil {
+		return nil, err
+	}
+	return map[string]any{"source": "SEC", "generatedAt": f.GeneratedAt, "asOf": f.AsOf, "symbols": len(f.Symbols)}, nil
+}
+
+// decodeStrict reads one small JSON document of at most max bytes: known
+// fields only, nothing after it.
+func decodeStrict(path string, v any, max int64) error {
 	st, err := os.Lstat(path)
 	if err != nil {
 		return err
 	}
-	if !st.Mode().IsRegular() || st.Size() > secMaxFile {
-		return fmt.Errorf("%s: not a regular file under %d bytes", filepath.Base(path), secMaxFile)
+	if !st.Mode().IsRegular() || st.Size() > max {
+		return fmt.Errorf("%s: not a regular file under %d bytes", filepath.Base(path), max)
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -325,7 +366,7 @@ func indexPage(asOf string, symbols, covered int) string {
 <p>Daily bars built from IEX trades, for <a href="https://stocks.vibistic.com/">Vibistic Stocks</a>. Data as of the close of ` + e(asOf) + `: ` + fmt.Sprint(symbols) + ` symbols, ` + fmt.Sprint(covered) + ` with enough IEX trading to show numbers.</p>
 <p>` + e(series.Citation) + ` <a href="` + e(series.TermsURL) + `">IEX Historical Data Terms of Use</a>.</p>
 <p>The data reflects trading on IEX only, not other markets, and is a reference point only, not a basis for trading decisions. Not investment advice.</p>
-<p>Files: <code>v1/manifest.json</code>, <code>v1/s/{SYMBOL}.json</code> and, for symbols with enough IEX trading, <code>v1/og/{SYMBOL}.png</code> (the preview image of a Vibistic Stocks share link), and <code>v1/sec/{SYMBOL}.json</code> (revenue and net income from the company's SEC filings, as first reported). How they are made: <a href="https://github.com/vibistic-hq/vibistic-iex-data">github.com/vibistic-hq/vibistic-iex-data</a>.</p>
+<p>Files: <code>v1/manifest.json</code>, <code>v1/s/{SYMBOL}.json</code> and, for symbols with enough IEX trading, <code>v1/og/{SYMBOL}.png</code> (the preview image of a Vibistic Stocks share link), and <code>v1/sec/{SYMBOL}.json</code> (revenue and net income from the company's SEC filings, as first reported), and <code>v1/earnings.json</code> (each company's next earnings release date, estimated from its past SEC filings: a year after the matching one, so it can be off). How they are made: <a href="https://github.com/vibistic-hq/vibistic-iex-data">github.com/vibistic-hq/vibistic-iex-data</a>.</p>
 </body></html>
 `
 }
