@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -81,7 +82,7 @@ func run(subsPath, tickersPath, reviewedPath, out string, now time.Time) error {
 		entries[e.Name] = e
 	}
 	today := earnings.NewYorkDay(now)
-	f := &earnings.File{V: 1, Source: "SEC", GeneratedAt: now.UTC().Format(time.RFC3339), Today: today.Format("2006-01-02"), Symbols: map[string]earnings.Entry{}}
+	f := &earnings.File{V: 1, Source: "SEC", GeneratedAt: now.UTC().Format(time.RFC3339), Today: today.Format("2006-01-02"), Symbols: map[string]earnings.Entry{}, NoEstimate: map[string][]string{}}
 	var asOf time.Time
 	skipped := 0
 	for name, e := range entries {
@@ -103,8 +104,11 @@ func run(subsPath, tickersPath, reviewedPath, out string, now time.Time) error {
 		if newest.After(asOf) {
 			asOf = newest
 		}
-		next, last, basis, ok := earnings.Estimate(raw, today)
-		if !ok {
+		next, last, basis, why := earnings.Explain(raw, today)
+		if why != "" {
+			for _, s := range byCIK[cik] {
+				f.NoEstimate[why] = append(f.NoEstimate[why], s)
+			}
 			continue
 		}
 		for _, s := range byCIK[cik] {
@@ -119,6 +123,9 @@ func run(subsPath, tickersPath, reviewedPath, out string, now time.Time) error {
 		asOf = today.Add(-24 * time.Hour)
 	}
 	f.AsOf = asOf.Format("2006-01-02")
+	for _, syms := range f.NoEstimate {
+		sort.Strings(syms)
+	}
 	// Also refuses a newest filing over earnings.MaxSourceAge days old.
 	if err := earnings.Validate(f); err != nil {
 		return err

@@ -317,6 +317,11 @@ func TestRunPublishesTheEarningsFileOrLeavesItOut(t *testing.T) {
 			b, _ := os.ReadFile(p)
 			os.WriteFile(p, []byte(strings.Replace(string(b), `"next":"2026-10-29"`, `"next":"2026-10-30"`, 1)), 0o644)
 		},
+		"null reason list": func(p string) {
+			earningsFile(t, p, "2026-10-09T09:30:00Z", earnings.MinSymbols)
+			b, _ := os.ReadFile(p)
+			os.WriteFile(p, []byte(strings.Replace(string(b), `{"v":1`, `{"noEstimate":{"few":null},"v":1`, 1)), 0o644)
+		},
 		"extra field": func(p string) {
 			earningsFile(t, p, "2026-10-09T09:30:00Z", earnings.MinSymbols)
 			b, _ := os.ReadFile(p)

@@ -57,6 +57,7 @@ func fixture(t *testing.T, extra map[string][]byte) (string, string, string) {
 		"CIK0000019617-submissions-001.json": jpmPage,
 		"CIK0000000011.json":                 sub("12", releases("2025-07-31", "2025-10-30", "2026-01-29", "2026-04-30", "2026-07-30")),
 		"CIK0000000013.json":                 sub(13, releases("2025-07-31", "2025-10-30", "2026-01-29", "2026-04-30", "2026-07-30"), map[string]string{"name": "CIK0000000013-submissions-001.json", "filingTo": "2025-06-30"}),
+		"CIK0000000021.json":                 sub(21, releases("2026-08-04")),
 		"CIK0000000099.json":                 sub(99, releases("2025-07-31", "2025-10-30", "2026-01-29", "2026-04-30", "2026-07-30")),
 	}
 	for k, v := range extra {
@@ -72,7 +73,7 @@ func fixture(t *testing.T, extra map[string][]byte) (string, string, string) {
 	zw.Close()
 	zf.Close()
 	tpath := filepath.Join(tmp, "tickers.json")
-	os.WriteFile(tpath, []byte(`{"fields":["cik","name","ticker","exchange"],"data":[[320193,"Apple Inc.","AAPL","Nasdaq"],[19617,"JPMorgan","JPM","NYSE"],[11,"Wrong Cik","WRNG","NYSE"],[13,"Lost Page","LOST","NYSE"]]}`), 0o644)
+	os.WriteFile(tpath, []byte(`{"fields":["cik","name","ticker","exchange"],"data":[[320193,"Apple Inc.","AAPL","Nasdaq"],[19617,"JPMorgan","JPM","NYSE"],[11,"Wrong Cik","WRNG","NYSE"],[13,"Lost Page","LOST","NYSE"],[21,"New Listing","NEWCO","Nasdaq"]]}`), 0o644)
 	rpath := filepath.Join(tmp, "reviewed.json")
 	os.WriteFile(rpath, []byte(`[]`), 0o644)
 	return zpath, tpath, rpath
@@ -106,6 +107,10 @@ func TestRun(t *testing.T) {
 		if f.Symbols[s] != e {
 			t.Errorf("%s = %+v, want %+v", s, f.Symbols[s], e)
 		}
+	}
+	// A recent listing with one release: no estimate, and why.
+	if got := f.NoEstimate; len(got) != 1 || len(got[earnings.WhyFew]) != 1 || got[earnings.WhyFew][0] != "NEWCO" {
+		t.Fatalf("noEstimate = %v (skipped companies are not listed)", got)
 	}
 	if f.Today != "2026-10-20" || f.AsOf != "2026-10-19" || f.GeneratedAt != "2026-10-20T09:30:00Z" {
 		t.Fatalf("header %+v", f)
