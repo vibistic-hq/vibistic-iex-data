@@ -136,6 +136,32 @@ func TestRunRefusesStaleFilings(t *testing.T) {
 	}
 }
 
+// A page whose last filing date is missing or bad, or a page listed twice,
+// skips the company: a page left out must be known to be too old.
+func TestRunSkipsBadPageLists(t *testing.T) {
+	minSymbols = 1
+	defer func() { minSymbols = earnings.MinSymbols }()
+	recent := releases("2025-07-31", "2025-10-30", "2026-01-29", "2026-04-30", "2026-07-30")
+	page, _ := json.Marshal(releases("2026-10-13"))
+	for name, pages := range map[string][]map[string]string{
+		"no filingTo":  {{"name": "CIK0000320193-submissions-001.json"}},
+		"bad filingTo": {{"name": "CIK0000320193-submissions-001.json", "filingTo": "2026-13-01"}},
+		"twice":        {{"name": "CIK0000320193-submissions-001.json", "filingTo": "2026-10-13"}, {"name": "CIK0000320193-submissions-001.json", "filingTo": "2026-10-13"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			z, tk, r := fixture(t, map[string][]byte{"CIK0000320193.json": sub(320193, recent, pages...), "CIK0000320193-submissions-001.json": page})
+			out := filepath.Join(t.TempDir(), "earnings.json")
+			if err := run(z, tk, r, out, now); err != nil {
+				t.Fatal(err)
+			}
+			b, _ := os.ReadFile(out)
+			if strings.Contains(string(b), "AAPL") {
+				t.Fatal("AAPL got an estimate")
+			}
+		})
+	}
+}
+
 func TestRunSkipsUnalignedColumns(t *testing.T) {
 	minSymbols = 1
 	defer func() { minSymbols = earnings.MinSymbols }()

@@ -160,33 +160,58 @@ func TestEstimateIrregularOrStale(t *testing.T) {
 	if _, _, _, ok := Estimate(apple[:len(apple)-2], d("2026-10-20")); ok {
 		t.Fatal("stale: want none")
 	}
-	// Gap boundaries: exactly MinGap and MaxGap apart is regular.
-	base := d("2024-01-01")
-	var reg []time.Time
-	for i, g := range []int{0, MinGap, MaxGap, MinGap, MaxGap} {
-		if i == 0 {
-			reg = append(reg, base)
-			continue
-		}
-		reg = append(reg, reg[len(reg)-1].Add(time.Duration(g)*24*time.Hour))
+}
+
+// gapped returns releases from 2024-01-01 separated by the gaps (days), and
+// the day after the last one.
+func gapped(gaps ...int) ([]time.Time, time.Time) {
+	out := []time.Time{d("2024-01-01")}
+	for _, g := range gaps {
+		out = append(out, out[len(out)-1].Add(time.Duration(g)*24*time.Hour))
 	}
-	if !regular(reg) {
-		t.Fatal("boundaries are regular")
+	return out, out[len(out)-1].Add(24 * time.Hour)
+}
+
+func TestEstimateGapBoundaries(t *testing.T) {
+	// Quarterly, with one tail gap of exactly MinGap made up by the next
+	// (56 + 126 = 2 x 91), so last year's anniversaries still line up.
+	rel, today := gapped(91, 91, 91, 91, 91, MinGap, 126, 91)
+	next, _, basis, ok := Estimate(rel, today)
+	if !ok || !next.Equal(rel[5].Add(YearDays*day)) || !basis.Equal(rel[5]) {
+		t.Fatalf("MinGap: got %v %v %v", next, basis, ok)
 	}
-	reg[len(reg)-1] = reg[len(reg)-1].Add(24 * time.Hour)
-	if regular(reg) {
-		t.Fatal("MaxGap+1 is not")
+	rel, today = gapped(91, 91, 91, 91, 91, MinGap-1, 127, 91)
+	if _, _, _, ok := Estimate(rel, today); ok {
+		t.Fatal("MinGap-1: want none")
+	}
+	// Every gap exactly MaxGap: regular, and the anniversary falls 84 days
+	// after the last release (364 = 2 x 140 + 84).
+	rel, today = gapped(MaxGap, MaxGap, MaxGap, MaxGap, MaxGap, MaxGap)
+	next, last, _, ok := Estimate(rel, today)
+	if !ok || gapDays(last, next) != YearDays-2*MaxGap {
+		t.Fatalf("MaxGap: got %v %v %v", next, last, ok)
+	}
+	rel, today = gapped(MaxGap+1, MaxGap+1, MaxGap+1, MaxGap+1, MaxGap+1, MaxGap+1)
+	if _, _, _, ok := Estimate(rel, today); ok {
+		t.Fatal("MaxGap+1: want none")
 	}
 }
 
-func regular(rel []time.Time) bool {
-	tail := rel[len(rel)-RegularCount:]
-	for i := 1; i < len(tail); i++ {
-		if g := gapDays(tail[i-1], tail[i]); g < MinGap || g > MaxGap {
-			return false
-		}
+func TestEstimateSameQuarterBoundary(t *testing.T) {
+	// Last year's matching filing lands SameQuarter days after this year's
+	// last release: that quarter, already reported; the next one is estimated.
+	rel, _ := gapped(91, 91, 91, 91, 91, 91, 91-SameQuarter)
+	last := rel[len(rel)-1]
+	next, _, _, ok := Estimate(rel, last.Add(day))
+	if !ok || gapDays(last, next) != 91+SameQuarter {
+		t.Fatalf("SameQuarter: got %v %v", next, ok)
 	}
-	return true
+	// One day more: unclear, no estimate.
+	rel, _ = gapped(91, 91, 91, 91, 91, 91, 91-SameQuarter-1)
+	last = rel[len(rel)-1]
+	if _, _, _, ok := Estimate(rel, last.Add(day)); ok {
+		t.Fatal("SameQuarter+1: want none")
+	}
 }
 
 func goodFile() *File {
@@ -203,6 +228,11 @@ func TestValidate(t *testing.T) {
 		func(f *File) { f.Source = "X" },
 		func(f *File) { f.GeneratedAt = "yesterday" },
 		func(f *File) { f.AsOf = "2026-10-21" },
+		func(f *File) { f.AsOf = "2026-10-20" },
+		func(f *File) { f.AsOf = "2026-10-14" },
+		func(f *File) { f.AsOf = "1990-01-01" },
+		// today must be the New York day of generatedAt.
+		func(f *File) { f.GeneratedAt = "2026-10-21T09:30:00Z" },
 		func(f *File) { f.Today = "2026-13-01" },
 		func(f *File) { f.Symbols["aapl"] = f.Symbols["AAPL"] },
 		func(f *File) { e := f.Symbols["AAPL"]; e.CIK = 0; f.Symbols["AAPL"] = e },

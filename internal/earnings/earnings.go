@@ -192,24 +192,34 @@ const MinSymbols = 1500
 // MaxSymbols bounds the file (the app refuses more).
 const MaxSymbols = 12000
 
+// MaxSourceAge: the newest filing read is at most this many days before the
+// build day (SEC's index stopped updating otherwise).
+const MaxSourceAge = 5
+
 // Validate checks a file the way the app does: any bad field rejects it.
 func Validate(f *File) error {
 	if f.V != 1 || f.Source != "SEC" {
 		return fmt.Errorf("v/source")
 	}
-	if _, err := time.Parse(time.RFC3339, f.GeneratedAt); err != nil {
+	gen, err := time.Parse(time.RFC3339, f.GeneratedAt)
+	if err != nil {
 		return fmt.Errorf("generatedAt: %w", err)
 	}
 	today, err := ParseDate(f.Today)
 	if err != nil {
 		return fmt.Errorf("today: %w", err)
 	}
+	// The estimates are for the New York day they were made on, from SEC
+	// filings at most MaxSourceAge days older.
+	if !today.Equal(NewYorkDay(gen)) {
+		return fmt.Errorf("today %s is not the New York day of %s", f.Today, f.GeneratedAt)
+	}
 	asOf, err := ParseDate(f.AsOf)
 	if err != nil {
 		return fmt.Errorf("asOf: %w", err)
 	}
-	if asOf.After(today) {
-		return fmt.Errorf("asOf %s after today %s", f.AsOf, f.Today)
+	if !asOf.Before(today) || gapDays(asOf, today) > MaxSourceAge {
+		return fmt.Errorf("asOf %s for today %s", f.AsOf, f.Today)
 	}
 	if len(f.Symbols) > MaxSymbols {
 		return fmt.Errorf("%d symbols", len(f.Symbols))

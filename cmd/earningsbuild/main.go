@@ -24,8 +24,13 @@ import (
 	"github.com/vibistic-hq/vibistic-iex-data/internal/sec"
 )
 
-// The largest company's filings index is a few tens of MB.
-const maxEntry = 256 << 20
+// The largest company's filings index is a few tens of MB; the pages one
+// company's history needs together, a few times that (JPM: about 25 pages of
+// 2,000 filings in 800 days).
+const (
+	maxEntry   = 256 << 20
+	maxCompany = 512 << 20
+)
 
 // Lowered by the tests.
 var minSymbols = earnings.MinSymbols
@@ -114,14 +119,12 @@ func run(subsPath, tickersPath, reviewedPath, out string, now time.Time) error {
 		asOf = today.Add(-24 * time.Hour)
 	}
 	f.AsOf = asOf.Format("2006-01-02")
+	// Also refuses a newest filing over earnings.MaxSourceAge days old.
 	if err := earnings.Validate(f); err != nil {
 		return err
 	}
 	if len(f.Symbols) < minSymbols {
 		return fmt.Errorf("only %d symbols (want at least %d)", len(f.Symbols), minSymbols)
-	}
-	if gap := today.Sub(asOf); gap > 5*24*time.Hour {
-		return fmt.Errorf("newest filing is from %s", f.AsOf)
 	}
 	b, err := json.Marshal(f)
 	if err != nil {
@@ -183,39 +186,57 @@ func companyReleases(e *zip.File, entries map[string]*zip.File, cik int64, today
 	if got, err := parseCIK(sub.CIK); err != nil || got != cik {
 		return nil, time.Time{}, fmt.Errorf("cik %s in the file for %d", sub.CIK, cik)
 	}
-	from := today.Add(-earnings.HistoryDays * 24 * time.Hour).Format("2006-01-02")
-	tables := []columns{sub.Filings.Recent}
-	prefix := fmt.Sprintf("CIK%010d-submissions-", cik)
-	for _, p := range sub.Filings.Files {
-		if p.FilingTo < from {
-			continue
-		}
-		// A page of this company only.
-		if !strings.HasPrefix(p.Name, prefix) || !pageRe.MatchString(p.Name) {
-			return nil, time.Time{}, fmt.Errorf("page %q", p.Name)
-		}
-		pe := entries[p.Name]
-		if pe == nil {
-			return nil, time.Time{}, fmt.Errorf("page %s missing", p.Name)
-		}
-		var c columns
-		if err := readJSON(pe, &c); err != nil {
-			return nil, time.Time{}, fmt.Errorf("%s: %w", p.Name, err)
-		}
-		tables = append(tables, c)
-	}
+	from := today.Add(-earnings.HistoryDays * 24 * time.Hour)
 	var raw []time.Time
 	var newest time.Time
-	for _, c := range tables {
+	// Each table is reduced to its dates as soon as it is read (none is kept).
+	add := func(c columns) error {
 		ds, err := earnings.Releases(c.Form, c.FilingDate, c.Items)
 		if err != nil {
-			return nil, time.Time{}, err
+			return err
 		}
 		raw = append(raw, ds...)
 		for _, s := range c.FilingDate {
 			if d, err := earnings.ParseDate(s); err == nil && d.After(newest) && !d.After(today) {
 				newest = d
 			}
+		}
+		return nil
+	}
+	if err := add(sub.Filings.Recent); err != nil {
+		return nil, time.Time{}, err
+	}
+	prefix := fmt.Sprintf("CIK%010d-submissions-", cik)
+	seen := map[string]bool{}
+	var budget uint64 = maxCompany
+	for _, p := range sub.Filings.Files {
+		// A page of this company only, listed once, with a real last filing
+		// date: a page left out must be known to end before the history used.
+		if !strings.HasPrefix(p.Name, prefix) || !pageRe.MatchString(p.Name) || seen[p.Name] {
+			return nil, time.Time{}, fmt.Errorf("page %q", p.Name)
+		}
+		seen[p.Name] = true
+		to, err := earnings.ParseDate(p.FilingTo)
+		if err != nil {
+			return nil, time.Time{}, fmt.Errorf("page %s: filingTo: %w", p.Name, err)
+		}
+		if to.Before(from) {
+			continue
+		}
+		pe := entries[p.Name]
+		if pe == nil {
+			return nil, time.Time{}, fmt.Errorf("page %s missing", p.Name)
+		}
+		if pe.UncompressedSize64 > budget {
+			return nil, time.Time{}, fmt.Errorf("pages over %d bytes", maxCompany)
+		}
+		budget -= pe.UncompressedSize64
+		var c columns
+		if err := readJSON(pe, &c); err != nil {
+			return nil, time.Time{}, fmt.Errorf("%s: %w", p.Name, err)
+		}
+		if err := add(c); err != nil {
+			return nil, time.Time{}, fmt.Errorf("%s: %w", p.Name, err)
 		}
 	}
 	return raw, newest, nil

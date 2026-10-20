@@ -11,7 +11,7 @@ cat > "$tmp/bin/gh" <<'GH'
 # gh release view earnings --json assets --jq ... | gh release download earnings -p NAME -D DIR
 case "$1 $2" in
   "release view") for f in "$ASSETS"/*; do [ -e "$f" ] && echo "$(basename "$f") $(stat -c %s "$f")"; done ;;
-  "release download") cp "$ASSETS/$5" "$7/" ;;
+  "release download") [ -z "${FAIL_DOWNLOAD:-}" ] || exit 1; cp "$ASSETS/$5" "$7/" ;;
 esac
 GH
 chmod +x "$tmp/bin/gh"
@@ -44,4 +44,11 @@ bash "$fetch" "$tmp/e3.json" >/dev/null 2>&1 || true
 echo stale > "$tmp/e4.json"
 bash "$fetch" "$tmp/e4.json" >/dev/null 2>&1 || true
 [ ! -e "$tmp/e4.json" ] || fail "kept an old file"
+
+# The listing works but the download fails: an old FILE is removed too.
+rm -f "$ASSETS"/*
+echo '{"new":1}' | gzip > "$ASSETS/earnings-20261019.json.gz"
+echo stale > "$tmp/e5.json"
+FAIL_DOWNLOAD=1 bash "$fetch" "$tmp/e5.json" >/dev/null 2>&1 || true
+[ ! -e "$tmp/e5.json" ] || fail "kept an old file after a failed download"
 echo "fetch-earnings.sh: ok"
