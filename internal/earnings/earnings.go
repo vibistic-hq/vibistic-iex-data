@@ -56,6 +56,9 @@ type File struct {
 	Today       string           `json:"today"`       // the New York day the estimates are for
 	AsOf        string           `json:"asOf"`        // the newest filing date in SEC's data
 	Symbols     map[string]Entry `json:"symbols"`
+	// Covered symbols without an estimate, by reason (one of Whys; issue #14).
+	// Optional: files from before it have none.
+	NoEstimate map[string][]string `json:"noEstimate,omitempty"`
 }
 
 // Entry is one symbol's estimate.
@@ -118,10 +121,29 @@ func Cluster(dates []time.Time) []time.Time {
 	return kept
 }
 
+// Why a symbol has no estimate (v1/earnings.json noEstimate), fixed codes the app words.
+const (
+	WhyNever     = "never"     // no earnings release (8-K Item 2.02) on file
+	WhyFew       = "few"       // fewer than RegularCount releases: a recent listing, most often
+	WhyIrregular = "irregular" // the last releases are not about a quarter apart
+	WhyStale     = "stale"     // the last release is over MaxAge days old
+	WhyUnclear   = "unclear"   // another Item 2.02 filing came shortly before the expected date
+	WhyNoMatch   = "nomatch"   // last year's matching release does not give a date ahead
+)
+
+// Whys lists every code.
+var Whys = []string{WhyNever, WhyFew, WhyIrregular, WhyStale, WhyUnclear, WhyNoMatch}
+
 // Estimate gives the next release's estimated date for a build on today (a
 // New York day at midnight UTC), from raw Item 2.02 filing dates. Filings on
 // or after today are ignored, so the estimate never depends on what came later.
 func Estimate(raw []time.Time, today time.Time) (next, last, basis time.Time, ok bool) {
+	next, last, basis, why := Explain(raw, today)
+	return next, last, basis, why == ""
+}
+
+// Explain is Estimate with the reason when there is none (one of Whys).
+func Explain(raw []time.Time, today time.Time) (next, last, basis time.Time, why string) {
 	var before []time.Time
 	for _, d := range raw {
 		if d.Before(today) {
@@ -129,18 +151,21 @@ func Estimate(raw []time.Time, today time.Time) (next, last, basis time.Time, ok
 		}
 	}
 	past := Cluster(before)
+	if len(past) == 0 {
+		return next, last, basis, WhyNever
+	}
 	if len(past) < RegularCount {
-		return
+		return next, last, basis, WhyFew
 	}
 	tail := past[len(past)-RegularCount:]
 	for i := 1; i < len(tail); i++ {
 		if g := gapDays(tail[i-1], tail[i]); g < MinGap || g > MaxGap {
-			return
+			return next, last, basis, WhyIrregular
 		}
 	}
 	last = past[len(past)-1]
 	if gapDays(last, today) > MaxAge {
-		return
+		return next, time.Time{}, basis, WhyStale
 	}
 	for _, d := range past {
 		e := d.Add(YearDays * day)
@@ -150,16 +175,16 @@ func Estimate(raw []time.Time, today time.Time) (next, last, basis time.Time, ok
 		g := gapDays(last, e)
 		if g < MinGap {
 			if g > SameQuarter {
-				return
+				return next, time.Time{}, basis, WhyUnclear
 			}
 			continue
 		}
 		if g > MaxGap {
-			return
+			break
 		}
-		return e, last, d, true
+		return e, last, d, ""
 	}
-	return
+	return next, time.Time{}, basis, WhyNoMatch
 }
 
 func gapDays(a, b time.Time) int { return int(b.Sub(a) / day) }
@@ -232,7 +257,37 @@ func Validate(f *File) error {
 			return fmt.Errorf("%s: %w", s, err)
 		}
 	}
+	// Each symbol once, in one place: with an estimate or under one reason.
+	seen := map[string]bool{}
+	n := len(f.Symbols)
+	for why, syms := range f.NoEstimate {
+		if !knownWhy(why) {
+			return fmt.Errorf("noEstimate: reason %q", why)
+		}
+		for _, s := range syms {
+			if !symbolRe.MatchString(s) || seen[s] {
+				return fmt.Errorf("noEstimate %s: symbol %q", why, s)
+			}
+			if _, ok := f.Symbols[s]; ok {
+				return fmt.Errorf("noEstimate %s: %s also has an estimate", why, s)
+			}
+			seen[s] = true
+			n++
+		}
+	}
+	if n > MaxSymbols {
+		return fmt.Errorf("%d symbols", n)
+	}
 	return nil
+}
+
+func knownWhy(w string) bool {
+	for _, k := range Whys {
+		if k == w {
+			return true
+		}
+	}
+	return false
 }
 
 func validateEntry(e Entry, today time.Time) error {

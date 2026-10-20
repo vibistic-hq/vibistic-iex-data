@@ -261,3 +261,52 @@ func TestNewYorkDay(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestExplainSaysWhy(t *testing.T) {
+	tsla := ds("2024-10-23", "2025-01-29", "2025-04-22", "2025-07-23", "2025-10-22", "2026-01-28", "2026-04-22", "2026-07-22", "2026-10-02")
+	semi := ds("2024-03-01", "2024-09-01", "2025-03-01", "2025-09-01", "2026-03-01", "2026-09-01")
+	for name, c := range map[string]struct {
+		raw   []time.Time
+		today string
+		want  string
+	}{
+		"apple":      {apple, "2026-10-20", ""},
+		"never":      {nil, "2026-10-20", WhyNever},
+		"only later": {ds("2026-10-21"), "2026-10-20", WhyNever},
+		// SpaceX: listed June 2026, one release (Aug 4).
+		"few":       {ds("2026-08-04"), "2026-10-20", WhyFew},
+		"irregular": {semi, "2026-10-01", WhyIrregular},
+		"stale":     {apple[:len(apple)-2], "2026-10-20", WhyStale},
+		"unclear":   {tsla, "2026-10-05", WhyUnclear},
+		"passed":    {apple, "2026-10-30", WhyNoMatch},
+	} {
+		next, _, _, why := Explain(c.raw, d(c.today))
+		if why != c.want {
+			t.Errorf("%s: why %q, want %q", name, why, c.want)
+		}
+		if (why == "") == next.IsZero() {
+			t.Errorf("%s: next %v with why %q", name, next, why)
+		}
+	}
+}
+
+func TestValidateNoEstimate(t *testing.T) {
+	f := goodFile()
+	f.NoEstimate = map[string][]string{WhyFew: {"SPCX"}, WhyUnclear: {"TSLA"}}
+	if err := Validate(f); err != nil {
+		t.Fatal(err)
+	}
+	for name, ne := range map[string]map[string][]string{
+		"unknown reason":   {"bogus": {"SPCX"}},
+		"bad symbol":       {WhyFew: {"spcx"}},
+		"twice":            {WhyFew: {"SPCX"}, WhyStale: {"SPCX"}},
+		"twice in one":     {WhyFew: {"SPCX", "SPCX"}},
+		"also an estimate": {WhyFew: {"AAPL"}},
+	} {
+		f := goodFile()
+		f.NoEstimate = ne
+		if Validate(f) == nil {
+			t.Errorf("%s passed", name)
+		}
+	}
+}
