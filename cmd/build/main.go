@@ -320,7 +320,19 @@ func readReviews(path string) ([]series.Review, error) {
 	return rs, series.ValidateReviews(rs)
 }
 
+// A real day file unpacks to a few MB; the cap keeps a corrupt or hostile release
+// asset from filling memory (security audit run-1). A variable so a test can lower it.
+var maxDayBytes int64 = 64 << 20
+
 func readDay(path string) (series.Day, error) {
+	// A regular file only, like decodeStrict's inputs: never a link out of days/.
+	st, err := os.Lstat(path)
+	if err != nil {
+		return series.Day{}, err
+	}
+	if !st.Mode().IsRegular() {
+		return series.Day{}, fmt.Errorf("%s is not a regular file", path)
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return series.Day{}, err
@@ -330,7 +342,12 @@ func readDay(path string) (series.Day, error) {
 	if err != nil {
 		return series.Day{}, err
 	}
-	h, lines, err := day.Read(io.Reader(zr))
+	lr := &io.LimitedReader{R: zr, N: maxDayBytes + 1}
+	h, lines, err := day.Read(lr)
+	// Checked first: a file cut off at the cap usually also fails to parse.
+	if lr.N <= 0 {
+		return series.Day{}, fmt.Errorf("%s unpacks to more than %d bytes", path, maxDayBytes)
+	}
 	if err != nil {
 		return series.Day{}, err
 	}

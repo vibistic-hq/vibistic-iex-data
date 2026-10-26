@@ -237,6 +237,17 @@ func Build(days []Day, reviews []Review, generatedAt time.Time) (map[string]*Fil
 				f.Breaks = append(f.Breaks, b)
 			}
 		}
+		// Compounded split adjustments can carry earlier bars outside what the app
+		// accepts, up to +Inf, which json.Marshal refuses, failing the whole build
+		// and so every symbol's update (security audit run-1). Such a symbol is
+		// served as sparse instead: no bars, like any stock whose IEX data cannot
+		// be relied on.
+		if !barsUsable(f.Bars) {
+			f.Coverage = "sparse"
+			f.Bars = [][7]float64{}
+			f.Splits = []Split{}
+			f.Breaks = []Break{}
+		}
 		out[sym] = f
 	}
 	// A reviewed entry that applies to nothing is a typo or a stale fix: fail
@@ -481,6 +492,34 @@ func adjust(ss []session, splits []Split) []session {
 }
 
 func round4(x float64) float64 { return math.Round(x*10000) / 10000 }
+
+// The largest price and daily volume the app accepts in a bar (internal/og's
+// Accepted uses the same limits).
+const (
+	MaxPrice  = 1e9
+	MaxVolume = 1e12
+)
+
+// UsablePrice reports whether a price is finite, positive and under MaxPrice.
+func UsablePrice(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) && v > 0 && v < MaxPrice }
+
+// barsUsable reports whether every bar's prices and volume are within the app's limits.
+func barsUsable(bars [][7]float64) bool {
+	for _, b := range bars {
+		for _, p := range [...]float64{b[1], b[2], b[3], b[4], b[6]} {
+			if !UsablePrice(p) {
+				return false
+			}
+		}
+		if v := b[5]; math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 || v > MaxVolume {
+			return false
+		}
+		if b[2] < b[3] { // high below low
+			return false
+		}
+	}
+	return true
+}
 
 func dateNum(d string) float64 {
 	var y, m, dd int

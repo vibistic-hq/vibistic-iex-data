@@ -12,7 +12,7 @@ The data reflects trading on IEX only, not other markets. It is a reference poin
 
 - `v1/manifest.json`: the session the data runs to (`asOf`), when it was built, and how many symbols it covers.
 - `v1/s/{SYMBOL}.json`: one file per symbol, for symbols shaped like the app's (`AAPL`, `BRK.B`):
-  - `coverage`: `"ok"`, or `"sparse"` when IEX trading in the stock is too thin for reliable numbers (fewer than 90% of the last 60 sessions with an IEX price, that is a trade that is not an odd lot, or under $50,000 of IEX trading on the median session). Sparse files carry only `metrics`, no bars.
+  - `coverage`: `"ok"`, or `"sparse"` when IEX trading in the stock is too thin for reliable numbers (fewer than 90% of the last 60 sessions with an IEX price, that is a trade that is not an odd lot, or under $50,000 of IEX trading on the median session), or when its split-adjusted bars fall outside what the app accepts (a price that is not positive or not below $1 billion, a daily volume over 10^12, or a high below the low), which compounded detected splits can cause. Sparse files carry only `metrics`, no bars.
   - `bars`: `[yyyymmdd, open, high, low, close, volume, vwap]` per session, oldest first, the last four years, adjusted for the splits listed in `splits`.
   - `splits` and `breaks`: see below.
 

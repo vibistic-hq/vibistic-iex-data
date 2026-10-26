@@ -191,7 +191,7 @@ func companyReleases(e *zip.File, entries map[string]*zip.File, cik int64, today
 		return nil, time.Time{}, err
 	}
 	if got, err := parseCIK(sub.CIK); err != nil || got != cik {
-		return nil, time.Time{}, fmt.Errorf("cik %s in the file for %d", sub.CIK, cik)
+		return nil, time.Time{}, fmt.Errorf("cik %.64q in the file for %d", sub.CIK, cik)
 	}
 	from := today.Add(-earnings.HistoryDays * 24 * time.Hour)
 	var raw []time.Time

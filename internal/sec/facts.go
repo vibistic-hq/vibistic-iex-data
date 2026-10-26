@@ -227,17 +227,19 @@ func newestEnd(quarters, years map[span]*Period) time.Time {
 	return newest
 }
 
+// Upstream values in errors are quoted and cut to 64 bytes (%.64q): they are
+// printed to the public Actions log (security audit run-1).
 func parseCIK(raw json.RawMessage) (int64, error) {
 	var n int64
 	if err := json.Unmarshal(raw, &n); err != nil {
 		var s string
 		if json.Unmarshal(raw, &s) != nil || !cikRe.MatchString(s) {
-			return 0, fmt.Errorf("cik %s", raw)
+			return 0, fmt.Errorf("cik %.64q", raw)
 		}
 		n, _ = strconv.ParseInt(s, 10, 64)
 	}
 	if n < 1 || n > 9999999999 {
-		return 0, fmt.Errorf("cik %s", raw)
+		return 0, fmt.Errorf("cik %.64q", raw)
 	}
 	return n, nil
 }

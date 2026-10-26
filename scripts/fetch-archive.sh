@@ -7,7 +7,12 @@ mkdir -p "$dir"
 # rolls forward when the target month is shorter, skipping the oldest month
 # (issue #10).
 oldest="$(date -u -d "$(date -u +%Y-%m-01) -49 months" +%Y-%m)"
-for tag in $(gh release list --limit 1000 --json tagName --jq '.[].tagName | select(startswith("days-"))'); do
+# Listed first, so a failed listing stops the script (inside a for list it would
+# just give no tags). Only days-YYYY-MM releases, and each file must belong to its
+# release's month and appear once: a misfiled or duplicate asset would otherwise
+# silently replace another (security audit run-1).
+tags="$(gh release list --limit 1000 --json tagName --jq '.[].tagName | select(test("^days-[0-9]{4}-[0-9]{2}$"))')"
+for tag in $tags; do
   [[ "${tag#days-}" < "$oldest" ]] && continue
   # A month's release with no day file yet (archive-day.sh creates the
   # release before uploading, so a failed upload leaves it empty) holds
@@ -16,6 +21,16 @@ for tag in $(gh release list --limit 1000 --json tagName --jq '.[].tagName | sel
     echo "::warning::$tag has no day files" >&2
     continue
   fi
-  gh release download "$tag" -D "$dir" -p '20*.jsonl.gz' --clobber
+  month="${tag#days-}"; month="${month/-/}"
+  part="$dir/.part-$tag"
+  rm -rf "$part"
+  gh release download "$tag" -D "$part" -p '20*.jsonl.gz'
+  for f in "$part"/*; do
+    name="$(basename "$f")"
+    [[ "$name" =~ ^${month}[0-9]{2}\.jsonl\.gz$ ]] || { echo "$tag holds $name, not a day of that month" >&2; exit 1; }
+    [ -e "$dir/$name" ] && { echo "$name is in more than one release" >&2; exit 1; }
+    mv "$f" "$dir/$name"
+  done
+  rmdir "$part"
 done
 ls "$dir" | wc -l

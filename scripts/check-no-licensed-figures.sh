@@ -16,7 +16,7 @@ patterns=(
   "Gap from Alpaca's"
   'Splits Alpaca lists'
   "Not in Alpaca's list"
-  'Alpaca [0-9.]+:[0-9.]'
+  'Alpaca [0-9.]+([eE][-+]?[0-9]+)?:[0-9.]'
   'adjusted with (the right|a different) ratio: [0-9]'
   'history cut there instead \(fail closed\): [0-9]'
   'history runs across an unadjusted split\): [0-9]'
@@ -26,10 +26,22 @@ patterns=(
   '\| [0-9]+ \| [0-9.]+ / [0-9.]+ \|'
 )
 
+# The tracked list is read NUL-separated: by default git C-quotes a name with a
+# non-ASCII or special character ("r\303\251port.md"), which is no real path, so
+# the old line-by-line list skipped such files without a word (security audit
+# run-1). For the same reason a tracked file that cannot be found is an error.
+strict=0
 if [ $# -gt 0 ]; then
   files=("$@")
 else
-  mapfile -t files < <(git ls-files | grep -v -x -e tools/validate.py -e scripts/check-no-licensed-figures.sh -e scripts/test-check-no-licensed-figures.sh)
+  strict=1
+  files=()
+  while IFS= read -r -d '' f; do
+    case "$f" in
+      tools/validate.py|scripts/check-no-licensed-figures.sh|scripts/test-check-no-licensed-figures.sh) ;;
+      *) files+=("$f") ;;
+    esac
+  done < <(git ls-files -z)
 fi
 
 status=0
@@ -37,7 +49,14 @@ for f in "${files[@]}"; do
   case "$f" in
     *.local.md) echo "$f: a local validation report is tracked" >&2; status=1; continue ;;
   esac
-  [ -f "$f" ] || continue
+  if [ ! -f "$f" ]; then
+    # A tracked symlink or submodule has no content of its own to check.
+    if [ "$strict" = 1 ] && [ ! -L "$f" ] && [ ! -d "$f" ]; then
+      echo "$f: tracked but not found, so not checked" >&2
+      status=1
+    fi
+    continue
+  fi
   for p in "${patterns[@]}"; do
     if grep -a -n -E -e "$p" -- "$f" >&2; then
       echo "$f: carries validation output computed from Alpaca's data (never publish it)" >&2
