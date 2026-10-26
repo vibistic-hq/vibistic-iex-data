@@ -10,7 +10,7 @@ import (
 )
 
 // maxVolume: the app's MAX_VOLUME.
-const maxVolume = 1e12
+const maxVolume = series.MaxVolume
 
 // Accepted mirrors the app's parseIexFile (vibistic-stocks src/iex/data.ts):
 // the app rejects a whole file over any of these, so a file it would refuse
@@ -84,7 +84,7 @@ func Accepted(f *series.File) error {
 	return nil
 }
 
-func positive(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) && v > 0 && v < 1e9 }
+func positive(v float64) bool { return series.UsablePrice(v) }
 
 func isDate(s string) bool {
 	if len(s) != 10 {

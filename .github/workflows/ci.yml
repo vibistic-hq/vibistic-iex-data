@@ -33,3 +33,5 @@ jobs:
         run: bash scripts/test-process-day.sh && bash scripts/test-session-days.sh && bash scripts/test-fetch-sec-snapshot.sh && bash scripts/test-fetch-earnings.sh && bash scripts/test-upload-earnings.sh && bash scripts/test-fetch-archive.sh
       - name: No licensed figures
         run: bash scripts/test-check-no-licensed-figures.sh && bash scripts/check-no-licensed-figures.sh
+      - name: validate.py helpers
+        run: python3 -m unittest tools/test_validate.py

@@ -62,4 +62,33 @@ printf 'Breaks in served histories: jump 888, quiet 999.\n' > "$dir/site-breaks.
 expect pass "$dir/site-breaks.md"
 printf 'Site as of 2001-01-09, 333 sessions archived; 4444 symbols, 2222 with coverage "ok".\n' > "$dir/site-summary.md"
 expect pass "$dir/site-summary.md"
+# A ratio printed in exponent form (Python's {:g}) is caught too.
+printf -- '- XYZ 2001-01-11: site 1:2, %s 1e-05:1\n' "$A" > "$dir/exp-ratio.md"
+expect fail "$dir/exp-ratio.md"
+
+# With no arguments (how CI runs it) every tracked file is checked, whatever its
+# name: git C-quotes non-ASCII names in a plain listing (security audit run-1).
+repo_check() { # repo_check pass|fail dir: the check with no arguments, run inside dir
+  if (cd "$2" && bash "$check_abs" 2>/dev/null); then got=pass; else got=fail; fi
+  [ "$got" = "$1" ] || { echo "FAIL: no-argument run in $2: want $1, got $got" >&2; exit 1; }
+}
+check_abs="$(cd "$(dirname "$check")" && pwd)/$(basename "$check")"
+new_repo() {
+  rm -rf "$1"; mkdir -p "$1"
+  git -C "$1" init -q
+  printf 'public notes\n' > "$1/README.md"
+}
+commit_all() { git -C "$1" add -A && git -C "$1" -c user.name=t -c user.email=t@example.invalid -c core.quotePath=true commit -q -m t; }
+repo="$dir/repo"
+new_repo "$repo"; commit_all "$repo"
+repo_check pass "$repo"
+new_repo "$repo"
+printf '<!-- licensed-data: personal use only, never commit -->\n' > "$repo/r$(printf '\303\251')port.md"
+commit_all "$repo"
+repo_check fail "$repo"
+new_repo "$repo"
+printf 'x\n' > "$repo/val$(printf '\303\251').local.md"
+git -C "$repo" add -f -- "val$(printf '\303\251').local.md"; commit_all "$repo"
+repo_check fail "$repo"
+
 echo ok

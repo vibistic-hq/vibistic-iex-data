@@ -176,3 +176,50 @@ func TestParseRejectsMessageCountBeyondPayload(t *testing.T) {
 		t.Fatal("want an error")
 	}
 }
+
+// Security audit run-1: hostile files fail cleanly instead of exhausting memory or
+// carrying odd symbol bytes into the public day files.
+func TestParseRejectsHostileInput(t *testing.T) {
+	withTrades := func(msgs ...[]byte) []byte {
+		return file(packet(append([][]byte{systemEvent('R', open), systemEvent('M', close)}, msgs...)...))
+	}
+	for name, sym := range map[string]string{"blank": "", "NUL": "\x00AB", "high byte": "\xffX", "tab": "A\tB"} {
+		if _, err := Parse(bytes.NewReader(withTrades(tradeMsg(msgTrade, 0, open+1, sym, 1, 10000, 1)))); err == nil {
+			t.Errorf("symbol %s: want an error", name)
+		}
+	}
+	if _, err := Parse(bytes.NewReader(withTrades(tradeMsg(msgTrade, 0, open+1, "BRK.B", 1, 10000, 1)))); err != nil {
+		t.Fatalf("printable symbol: %v", err)
+	}
+
+	defer func(t0 int64, s0 int, b0 int64) { maxTrades, maxSymbols, maxBreaks = t0, s0, b0 }(maxTrades, maxSymbols, maxBreaks)
+	maxTrades, maxSymbols, maxBreaks = 3, 2, 1
+	three := withTrades(tradeMsg(msgTrade, 0, open+1, "A", 1, 10000, 1), tradeMsg(msgTrade, 0, open+2, "A", 1, 10000, 2), tradeMsg(msgTrade, 0, open+3, "A", 1, 10000, 3))
+	if _, err := Parse(bytes.NewReader(three)); err != nil {
+		t.Fatalf("at the trade limit: %v", err)
+	}
+	cases := map[string][]byte{
+		"too many trades":  withTrades(tradeMsg(msgTrade, 0, open+1, "A", 1, 10000, 1), tradeMsg(msgTrade, 0, open+2, "A", 1, 10000, 2), tradeMsg(msgTrade, 0, open+3, "A", 1, 10000, 3), tradeMsg(msgTrade, 0, open+4, "A", 1, 10000, 4)),
+		"too many symbols": withTrades(tradeMsg(msgTrade, 0, open+1, "A", 1, 10000, 1), tradeMsg(msgTrade, 0, open+2, "B", 1, 10000, 2), tradeMsg(msgTrade, 0, open+3, "C", 1, 10000, 3)),
+		"too many breaks":  withTrades(tradeMsg(msgTradeBreak, 0, open+1, "A", 1, 10000, 1), tradeMsg(msgTradeBreak, 0, open+2, "A", 1, 10000, 2)),
+	}
+	for name, data := range cases {
+		if _, err := Parse(bytes.NewReader(data)); err == nil {
+			t.Errorf("%s: want an error", name)
+		}
+	}
+}
+
+// A packet may not run into the block's trailing length (security audit run-1).
+func TestParseRejectsPacketOverTrailingLength(t *testing.T) {
+	pkt := packet(systemEvent('R', open), systemEvent('M', close))
+	// The block is type, length, the 20-byte EPB header (capLen at 12:16 of the
+	// body), the frame and the trailing length; claim 4 more captured bytes.
+	capAt := 8 + 12
+	capLen := binary.LittleEndian.Uint32(pkt[capAt : capAt+4])
+	bad := append([]byte(nil), pkt...)
+	binary.LittleEndian.PutUint32(bad[capAt:capAt+4], capLen+4)
+	if _, err := Parse(bytes.NewReader(append(sectionHeader(), bad...))); err == nil {
+		t.Fatal("want an error")
+	}
+}

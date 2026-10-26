@@ -20,11 +20,13 @@ What it measures, for symbols the site marks coverage "ok":
 """
 import argparse
 import datetime as dt
+import decimal
 import glob
 import json
 import os
 import statistics
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -43,9 +45,29 @@ def load_env(path):
     return {"APCA-API-KEY-ID": env["ALPACA_KEY_ID"], "APCA-API-SECRET-KEY": env["ALPACA_SECRET"]}
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    # urllib copies request headers, the API key included, onto a redirect to any
+    # host; the data API never redirects, so a redirect is an error.
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, "redirect refused: " + newurl, headers, fp)
+
+
+OPENER = urllib.request.build_opener(NoRedirect)
+
+
+def ratio(x):
+    # Plain decimals, never exponent form (1e-05), which the licensed-figure
+    # check's patterns are written for.
+    # Decimal(repr(x)) keeps every significant digit (format(x, "f") rounds to six
+    # places, turning 1e-7 into "0": Codex review of #17).
+    if x == int(x):
+        return str(int(x))
+    return format(decimal.Decimal(repr(x)), "f")
+
+
 def get(headers, path, query):
     req = urllib.request.Request(API + path + "?" + urllib.parse.urlencode(query), headers=headers)
-    with urllib.request.urlopen(req, timeout=60) as r:
+    with OPENER.open(req, timeout=60) as r:
         return json.load(r)
 
 
@@ -205,14 +227,14 @@ def main():
                     late += got[0]["date"] != date
                 else:
                     wrong_ratio += 1
-                    wrong_list.append(f"{s} {date}: site {got[0]['new']}:{got[0]['old']} on {got[0]['date']}, Alpaca {new:g}:{old:g}")
+                    wrong_list.append(f"{s} {date}: site {got[0]['new']}:{got[0]['old']} on {got[0]['date']}, Alpaca {ratio(new)}:{ratio(old)}")
             elif is_cut:
                 cut += 1
             elif date == first_bar:
                 continue  # the history starts on the split day: nothing to adjust
             else:
                 missed += 1
-                missed_list.append(f"{s} {date} ({new:g}:{old:g})")
+                missed_list.append(f"{s} {date} ({ratio(new)}:{ratio(old)})")
     for s, f in ok.items():
         for x in f["splits"]:
             if (s, x["date"]) not in matched:

@@ -69,6 +69,30 @@ type trade struct {
 // 1.6 messages. It fails when the file is malformed or when it does not say
 // when regular hours started and ended: a day without them cannot be split
 // into regular and extended hours, so it is better missing than wrong.
+// Limits far above a real IEX day (a few million trades, about 12,000 symbols),
+// so a corrupt or hostile file fails with an error instead of exhausting memory:
+// Parse keeps every trade until the end of the file (security audit run-1).
+// Variables only so tests can lower them.
+var (
+	maxTrades  int64 = 50_000_000
+	maxSymbols       = 100_000
+	maxBreaks  int64 = 10_000_000
+)
+
+// validSymbol reports whether a symbol is a non-empty run of printable ASCII, as
+// TOPS symbols are; anything else would end up in the public day files as is.
+func validSymbol(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x21 || s[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
 func Parse(r io.Reader) (*Day, error) {
 	day := &Day{}
 	symIndex := map[string]int32{}
@@ -95,13 +119,25 @@ func Parse(r io.Reader) (*Day, error) {
 			id := int64(binary.LittleEndian.Uint64(msg[30:38]))
 			if msg[0] == msgTradeBreak {
 				day.Breaks++
+				if day.Breaks > maxBreaks {
+					return fmt.Errorf("more than %d trade breaks", maxBreaks)
+				}
 				broken[id] = true
 				return nil
 			}
 			day.Trades++
+			if day.Trades > maxTrades {
+				return fmt.Errorf("more than %d trades", maxTrades)
+			}
 			sym := strings.TrimRight(string(msg[10:18]), " ")
+			if !validSymbol(sym) {
+				return fmt.Errorf("trade with a symbol that is not printable ASCII: %q", sym)
+			}
 			idx, ok := symIndex[sym]
 			if !ok {
+				if len(symbols) >= maxSymbols {
+					return fmt.Errorf("more than %d symbols", maxSymbols)
+				}
 				idx = int32(len(symbols))
 				symIndex[sym] = idx
 				symbols = append(symbols, sym)
@@ -214,11 +250,13 @@ func forEachMessage(r io.Reader, fn func([]byte) error) error {
 		if btype != 6 { // Enhanced Packet Block
 			continue
 		}
-		if body < 20 {
+		// body ends with the block's 4-byte trailing length, which a packet must not
+		// reach into.
+		if body < 24 {
 			return errors.New("short packet block")
 		}
 		capLen := int(order.Uint32(buf[12:16]))
-		if 20+capLen > body {
+		if 20+capLen > body-4 {
 			return errors.New("packet longer than its block")
 		}
 		if err := packetMessages(buf[20:20+capLen], fn); err != nil {

@@ -48,8 +48,11 @@ case "$1 $2" in
     ls "$dir" | grep -c '^20.*\.jsonl\.gz$' || true ;;
   "release download")
     [ "$3" = "days-$EMPTY_MONTH" ] && { echo "no assets match the file pattern" >&2; exit 1; }
+    mkdir -p "$5"
     cp "$RELEASES/$3"/*.jsonl.gz "$5/" ;;
 esac
+[ -f "$RELEASES/.list-fails" ] && [ "$1 $2" = "release list" ] && exit 1
+exit 0
 GH
 chmod +x "$tmp/bin/gh"
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -64,5 +67,21 @@ export EMPTY_MONTH="$this_month"
 err=$(bash "$fetch" "$tmp/out2" 2>&1 >/dev/null) || fail "fetch failed on an empty release: $err"
 echo "$err" | grep -q "has no day files" || fail "no warning for the empty release: $err"
 [ "$(ls "$tmp/out2")" = "20220930.jsonl.gz" ] || fail "wrong files with an empty release: $(ls "$tmp/out2" | tr '\n' ' ')"
+
+# Security audit run-1: a failed listing fails the fetch; a file filed under the
+# wrong month, or present in two releases, fails it too.
+export EMPTY_MONTH=none
+touch "$tmp/releases/.list-fails"
+bash "$fetch" "$tmp/out3" >/dev/null 2>&1 && fail "a failed release listing passed"
+rm "$tmp/releases/.list-fails"
+echo '{}' > "$tmp/releases/days-$this_month/20220930.jsonl.gz"
+err=$(bash "$fetch" "$tmp/out4" 2>&1 >/dev/null) && fail "a misfiled day file passed"
+echo "$err" | grep -q "not a day of that month" || fail "no misfiled message: $err"
+rm "$tmp/releases/days-$this_month/20220930.jsonl.gz"
+
+# Fetching again into a populated directory (a retry, or a rerun) replaces the
+# files (Codex review of #17).
+bash "$fetch" "$tmp/out1" >/dev/null 2>&1 || fail "a second fetch into a populated directory failed"
+[ "$(ls "$tmp/out1" | tr '\n' ' ')" = "20220930.jsonl.gz 20261030.jsonl.gz " ] || fail "wrong files after a refetch: $(ls "$tmp/out1" | tr '\n' ' ')"
 
 echo "ok"

@@ -61,7 +61,8 @@ jobs:
           added=0
           for d in $(scripts/session-days.sh); do
             grep -qx "$d" archived.txt && continue
-            rc=0; scripts/process-day.sh "$d" out || rc=$?
+            # Parsing IEX's data needs no token: only archive-day.sh gets it.
+            rc=0; env -u GH_TOKEN scripts/process-day.sh "$d" out || rc=$?
             [ "$rc" = 3 ] && continue
             [ "$rc" = 5 ] && { echo "::notice::$d: IEX's file is still the incomplete one, not read again"; continue; }
             # Incomplete IEX file: not archived. Recorded by process-day.sh, so

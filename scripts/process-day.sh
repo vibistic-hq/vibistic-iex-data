@@ -17,7 +17,8 @@ out="${2:?output dir}"
 bin="${IEXAGG:-$(dirname "$0")/../bin/iexagg}"
 
 index="$(mktemp)"
-code="$(curl -s --retry 3 -o "$index" -w '%{http_code}' "https://iextrading.com/api/1.0/hist?date=$d")"
+# The index for one day is a few hundred bytes: bounded in size and time.
+code="$(curl -s --retry 3 --max-time 60 --max-filesize 1000000 -o "$index" -w '%{http_code}' "https://iextrading.com/api/1.0/hist?date=$d")"
 if [ "$code" = 404 ]; then
   echo "no IEX HIST file for $d" >&2
   exit 3
@@ -26,11 +27,17 @@ fi
 link="$(jq -r '[.[] | select(.feed == "TOPS" and .version == "1.6")][0].link // empty' "$index")"
 rm -f "$index"
 [ -n "$link" ] || { echo "no TOPS 1.6 file listed for $d" >&2; exit 3; }
-# Only IEX's own storage bucket, never wherever a changed index might point.
-case "$link" in
-  https://www.googleapis.com/download/storage/v1/b/iex/o/*) ;;
-  *) echo "unexpected download host for $d" >&2; exit 1 ;;
-esac
+# Only IEX's own storage bucket, never wherever a changed index might point. The
+# object name is one percent-encoded path segment (data%2Ffeeds%2F...), so the link
+# must have no further '/', no '..', no encoded dot or backslash, and only a plain
+# query. A prefix match alone let '../../other-bucket' through, which curl then
+# resolved to another bucket (security audit run-1); curl also gets --path-as-is
+# below, so the path requested is exactly the path checked.
+object_re='^https://www\.googleapis\.com/download/storage/v1/b/iex/o/[A-Za-z0-9._%-]+(\?[A-Za-z0-9=&._-]*)?$'
+if ! [[ "$link" =~ $object_re ]] || [[ "$link" == *..* ]] || [[ "${link,,}" == *%2e* ]] || [[ "${link,,}" == *%5c* ]]; then
+  echo "unexpected download link for $d" >&2
+  exit 1
+fi
 gen="$(sed -n 's/.*[?&]generation=\([0-9]\{1,20\}\)\(&.*\)\{0,1\}$/\1/p' <<<"$link")"
 if [ -n "${IEX_INCOMPLETE:-}" ] && [ -n "$gen" ] && [ -f "$IEX_INCOMPLETE" ] && grep -qx "$d $gen" "$IEX_INCOMPLETE"; then
   echo "IEX's file for $d is still the incomplete one already read; skipped" >&2
@@ -42,7 +49,7 @@ tmp="$out/$d.jsonl.gz.part"
 # stage's status is checked: a broken download, decompression or output is a
 # plain failure (exit 1), and only a whole file that iexagg finds incomplete is 4.
 set +e
-curl -sf --retry 3 "$link" | gzip -dc | "$bin" "${d:0:4}-${d:4:2}-${d:6:2}" | gzip -9 > "$tmp"
+curl -sf --path-as-is --retry 3 "$link" | gzip -dc | "$bin" "${d:0:4}-${d:4:2}-${d:6:2}" | gzip -9 > "$tmp"
 st=("${PIPESTATUS[@]}")
 set -e
 rc=0

@@ -5,3 +5,17 @@ days/
 *.part
 __pycache__/
 *.local.md
+# Local secrets and pipeline outputs, never committed (security audit run-1)
+.env
+.env.*
+*.pem
+*.key
+.claude/
+/sec/
+/dl/
+/earnings.json
+/sec-*.tar.gz
+/earnings-*.json.gz
+/archived.txt
+/incomplete.txt
+/todo.txt

@@ -30,7 +30,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      # bash with pipefail: a failed index fetch fails the plan instead of giving
+      # an empty one that still republishes.
       - id: plan
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           START: ${{ inputs.start }}
@@ -75,7 +78,8 @@ jobs:
           mkdir -p out
           failed=0
           for d in $DATES; do
-            rc=0; scripts/process-day.sh "$d" out || rc=$?
+            # Parsing IEX's data needs no token: only archive-day.sh gets it.
+            rc=0; env -u GH_TOKEN scripts/process-day.sh "$d" out || rc=$?
             [ "$rc" = 3 ] && continue
             if [ "$rc" = 4 ]; then echo "::warning::$d: IEX's file is incomplete, day left out"; continue; fi
             if [ "$rc" != 0 ]; then echo "::warning::$d failed ($rc)"; failed=1; continue; fi

@@ -69,10 +69,10 @@ func Tickers(r io.Reader, reviewed []Class) (map[string]int64, error) {
 		var cik int64
 		var name, ticker string
 		if err := json.Unmarshal(row[0], &cik); err != nil || cik < 1 || cik > 9999999999 {
-			return nil, fmt.Errorf("row %d: cik %s", i, row[0])
+			return nil, fmt.Errorf("row %d: cik %.64q", i, row[0])
 		}
 		if err := json.Unmarshal(row[2], &ticker); err != nil {
-			return nil, fmt.Errorf("row %d: ticker %s", i, row[2])
+			return nil, fmt.Errorf("row %d: ticker %.64q", i, row[2])
 		}
 		json.Unmarshal(row[1], &name) // a missing name only means no fund check
 		sym := strings.ReplaceAll(strings.ToUpper(ticker), "-", ".")

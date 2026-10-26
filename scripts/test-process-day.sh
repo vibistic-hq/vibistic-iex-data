@@ -14,6 +14,7 @@ mkdir -p "$dir/bin" "$dir/out"
 # $dir/index set to 404 or nofeed, the index has no file for the day.
 cat > "$dir/bin/curl" <<'EOF'
 #!/usr/bin/env bash
+args="$*"
 out=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -27,10 +28,13 @@ if [ -n "$out" ]; then
     nofeed) printf '[{"link":"x","feed":"DEEP","version":"1.0"}]' > "$out"; printf 200; exit 0 ;;
   esac
   gen=$(cat "$FAKE/gen")
-  printf '[{"link":"https://www.googleapis.com/download/storage/v1/b/iex/o/data%%2Ff.pcap.gz%s","feed":"TOPS","version":"1.6"}]' "$gen" > "$out"
+  link="https://www.googleapis.com/download/storage/v1/b/iex/o/data%2Ff.pcap.gz$gen"
+  [ -f "$FAKE/link" ] && link=$(cat "$FAKE/link")
+  jq -n --arg link "$link" '[{link: $link, feed: "TOPS", version: "1.6"}]' > "$out"
   printf 200
 else
   echo download >> "$FAKE/downloads"
+  printf '%s\n' "$args" >> "$FAKE/download-args"
   case "$(cat "$FAKE/dl-mode" 2>/dev/null)" in
     badgzip) printf 'pcap' | gzip -c | head -c 12 ;;
     fail) printf 'pcap' | gzip -c | head -c 12; exit 18 ;;
@@ -132,5 +136,30 @@ for index in 404 nofeed; do
 done
 rm -f "$dir/index"
 want_downloads "$n"
+
+# The download link must stay inside IEX's bucket (security audit run-1): dot
+# segments, encoded dots, backslashes, extra path segments and other hosts are
+# refused before anything is downloaded.
+echo '?generation=777&alt=media' > "$dir/gen"
+n=$(downloads)
+for bad in \
+  'https://www.googleapis.com/download/storage/v1/b/iex/o/../../attacker/o/day.pcap.gz?generation=1&alt=media' \
+  'https://www.googleapis.com/download/storage/v1/b/iex/o/%2e%2e/%2E%2E/attacker/o/day.pcap.gz' \
+  'https://www.googleapis.com/download/storage/v1/b/iex/o/data%5c..%5cday.pcap.gz' \
+  'https://www.googleapis.com/download/storage/v1/b/iex/o/data/day.pcap.gz' \
+  'https://www.googleapis.com/download/storage/v1/b/iex/o/data%2Fday.pcap.gz#frag' \
+  'https://www.googleapis.com.evil.example/download/storage/v1/b/iex/o/data%2Fday.pcap.gz' \
+  'http://www.googleapis.com/download/storage/v1/b/iex/o/data%2Fday.pcap.gz'; do
+  printf '%s' "$bad" > "$dir/link"
+  run 1
+done
+rm -f "$dir/link"
+want_downloads "$n"
+# A real-shaped link is downloaded with --path-as-is, so the path curl sends is
+# the one checked.
+: > "$dir/download-args"
+echo 0 > "$dir/agg-rc"
+run 0
+grep -q -- '--path-as-is' "$dir/download-args" || { echo "FAIL: download without --path-as-is" >&2; exit 1; }
 
 echo "process-day.sh: ok"
