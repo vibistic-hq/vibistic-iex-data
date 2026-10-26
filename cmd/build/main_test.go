@@ -418,3 +418,37 @@ func TestReadDayRefusesLinksAndOversizedFiles(t *testing.T) {
 		t.Fatalf("oversized day file: %v", err)
 	}
 }
+
+// A symbol made sparse for unusable bars still has its reviews checked: an entry
+// that matches no gap is a typo and fails the build, as it did before (Codex
+// review of #17). Only thinly traded symbols exempt their reviews.
+func TestRunStillRejectsAnUnmatchedReviewForASymbolWithUnusableBars(t *testing.T) {
+	tmp := t.TempDir()
+	days := filepath.Join(tmp, "days")
+	if err := os.Mkdir(days, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	aapl := tops.Summary{Symbol: "AAPL", Open: 100_0000, High: 101_0000, Low: 99_0000, Close: 100_5000, Volume: 10_000, Notional: 1_005_000, Trades: 10, LotTrades: 10}
+	zzz := tops.Summary{Symbol: "ZZZ", Open: 1000_0000, High: 1000_0000, Low: 1_0000, Close: 1_0000, Volume: 1000, Notional: 1_000_000, Trades: 10, LotTrades: 10}
+	d := time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC)
+	skipped := ""
+	for n := 0; n < 50; d = d.AddDate(0, 0, 1) {
+		if wd := d.Weekday(); wd == time.Saturday || wd == time.Sunday {
+			continue
+		}
+		n++
+		if n == 20 && skipped == "" {
+			skipped = d.Format("2006-01-02") // no session: a review dated here matches nothing
+			continue
+		}
+		writeDay(t, days, d.Format("2006-01-02"), aapl, zzz)
+	}
+	reviewed := filepath.Join(tmp, "reviewed.json")
+	if err := os.WriteFile(reviewed, []byte(`[{"symbol":"ZZZ","date":"`+skipped+`","kind":"break","note":"typo"}]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := run(days, reviewed, "", "", filepath.Join(tmp, "site"), d.Add(7*time.Hour))
+	if err == nil || !strings.Contains(err.Error(), "matches no overnight gap") {
+		t.Fatalf("want the unmatched review rejected, got %v", err)
+	}
+}

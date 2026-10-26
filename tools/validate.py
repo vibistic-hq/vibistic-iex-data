@@ -20,6 +20,7 @@ What it measures, for symbols the site marks coverage "ok":
 """
 import argparse
 import datetime as dt
+import decimal
 import glob
 import json
 import os
@@ -57,7 +58,11 @@ OPENER = urllib.request.build_opener(NoRedirect)
 def ratio(x):
     # Plain decimals, never exponent form (1e-05), which the licensed-figure
     # check's patterns are written for.
-    return format(x, "f").rstrip("0").rstrip(".") if x != int(x) else str(int(x))
+    # Decimal(repr(x)) keeps every significant digit (format(x, "f") rounds to six
+    # places, turning 1e-7 into "0": Codex review of #17).
+    if x == int(x):
+        return str(int(x))
+    return format(decimal.Decimal(repr(x)), "f")
 
 
 def get(headers, path, query):

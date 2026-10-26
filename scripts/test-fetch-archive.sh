@@ -79,4 +79,9 @@ err=$(bash "$fetch" "$tmp/out4" 2>&1 >/dev/null) && fail "a misfiled day file pa
 echo "$err" | grep -q "not a day of that month" || fail "no misfiled message: $err"
 rm "$tmp/releases/days-$this_month/20220930.jsonl.gz"
 
+# Fetching again into a populated directory (a retry, or a rerun) replaces the
+# files (Codex review of #17).
+bash "$fetch" "$tmp/out1" >/dev/null 2>&1 || fail "a second fetch into a populated directory failed"
+[ "$(ls "$tmp/out1" | tr '\n' ' ')" = "20220930.jsonl.gz 20261030.jsonl.gz " ] || fail "wrong files after a refetch: $(ls "$tmp/out1" | tr '\n' ' ')"
+
 echo "ok"

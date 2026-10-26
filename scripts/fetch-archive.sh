@@ -9,8 +9,8 @@ mkdir -p "$dir"
 oldest="$(date -u -d "$(date -u +%Y-%m-01) -49 months" +%Y-%m)"
 # Listed first, so a failed listing stops the script (inside a for list it would
 # just give no tags). Only days-YYYY-MM releases, and each file must belong to its
-# release's month and appear once: a misfiled or duplicate asset would otherwise
-# silently replace another (security audit run-1).
+# release's month: a misfiled asset would otherwise silently replace another
+# month's file of the same name (security audit run-1).
 tags="$(gh release list --limit 1000 --json tagName --jq '.[].tagName | select(test("^days-[0-9]{4}-[0-9]{2}$"))')"
 for tag in $tags; do
   [[ "${tag#days-}" < "$oldest" ]] && continue
@@ -28,8 +28,10 @@ for tag in $tags; do
   for f in "$part"/*; do
     name="$(basename "$f")"
     [[ "$name" =~ ^${month}[0-9]{2}\.jsonl\.gz$ ]] || { echo "$tag holds $name, not a day of that month" >&2; exit 1; }
-    [ -e "$dir/$name" ] && { echo "$name is in more than one release" >&2; exit 1; }
-    mv "$f" "$dir/$name"
+    # Tags are unique and each day must be in its own month's release, so no day
+    # comes from two releases; a file already in DIR from an earlier or interrupted
+    # run is simply replaced (Codex review of #17).
+    mv -f "$f" "$dir/$name"
   done
   rmdir "$part"
 done

@@ -198,6 +198,9 @@ func Build(days []Day, reviews []Review, generatedAt time.Time) (map[string]*Fil
 	}
 
 	used := map[string]bool{}
+	// Symbols too thinly traded to serve, whose reviews apply to nothing on purpose
+	// (unlike a symbol made sparse below for unusable bars, Codex review of #17).
+	thin := map[string]bool{}
 	out := map[string]*File{}
 	for sym, pv := range notional {
 		f := &File{V: 1, Symbol: sym, Source: "IEX", Citation: Citation, TermsURL: TermsURL, AsOf: asOf, GeneratedAt: generatedAt.UTC().Format(time.RFC3339), Splits: []Split{}, Breaks: []Break{}, Bars: [][7]float64{}}
@@ -205,6 +208,7 @@ func Build(days []Day, reviews []Review, generatedAt time.Time) (map[string]*Fil
 		f.Coverage = "ok"
 		if f.Metrics.PricedSessions < int(math.Ceil(MinTradedShare*float64(f.Metrics.Sessions))) || f.Metrics.MedianNotional < MinMedianNotional {
 			f.Coverage = "sparse"
+			thin[sym] = true
 			out[sym] = f
 			continue
 		}
@@ -259,7 +263,7 @@ func Build(days []Day, reviews []Review, generatedAt time.Time) (map[string]*Fil
 		if used[key] || r.Date < days[0].Date || r.Date > asOf {
 			continue
 		}
-		if f, ok := out[r.Symbol]; ok && f.Coverage == "sparse" {
+		if thin[r.Symbol] {
 			continue
 		}
 		return nil, fmt.Errorf("splits-reviewed.json: %s matches no overnight gap in the archive", key)
