@@ -40,9 +40,9 @@ func fixture(t *testing.T) (string, string, string, string) {
 	os.WriteFile(tpath, []byte(`{"fields":["cik","name","ticker","exchange"],"data":[
 		[320193,"Apple Inc.","AAPL","Nasdaq"],[1045810,"NVIDIA CORP","NVDA","Nasdaq"],
 		[1652044,"Alphabet Inc.","GOOGL","Nasdaq"],[1652044,"Alphabet Inc.","GOOG","Nasdaq"],
-		[99,"Broken","BRKN","NYSE"],[77,"Mislabeled","MISL","NYSE"]]}`), 0o644)
+		[99,"Broken","BRKN","NYSE"],[77,"Mislabeled","MISL","NYSE"],[320193,"Apple Inc.","AAPL-P","NYSE"]]}`), 0o644)
 	rpath := filepath.Join(tmp, "reviewed.json")
-	os.WriteFile(rpath, []byte(`[{"symbol":"GOOG","cik":1652044}]`), 0o644)
+	os.WriteFile(rpath, []byte(`[{"symbol":"GOOG","cik":1652044},{"symbol":"AAPL.P","cik":320193}]`), 0o644)
 	spath := filepath.Join(tmp, "shares-reviewed.json")
 	os.WriteFile(spath, []byte(`[{"cik":1652044,"name":"Alphabet"}]`), 0o644)
 	return zpath, tpath, rpath, spath
@@ -92,7 +92,7 @@ func TestSecbuild(t *testing.T) {
 		got = append(got, filepath.Base(n))
 	}
 	// Both Alphabet classes (GOOG reviewed); not the broken entry, nor a file whose CIK is not its name's.
-	if strings.Join(got, ",") != "AAPL.json,GOOG.json,GOOGL.json,NVDA.json,shares.json,snapshot.json" {
+	if strings.Join(got, ",") != "AAPL.P.json,AAPL.json,GOOG.json,GOOGL.json,NVDA.json,shares.json,snapshot.json" {
 		t.Fatalf("files %v", got)
 	}
 	b, _ := os.ReadFile(filepath.Join(out, "GOOG.json"))
@@ -101,7 +101,7 @@ func TestSecbuild(t *testing.T) {
 		t.Fatalf("GOOG.json: %v %+v", err, f)
 	}
 	s, _ := os.ReadFile(filepath.Join(out, "snapshot.json"))
-	if string(s) != `{"files":4,"generatedAt":"2026-10-18T09:00:00Z","source":"SEC","v":1}` {
+	if string(s) != `{"files":5,"generatedAt":"2026-10-18T09:00:00Z","source":"SEC","v":1}` {
 		t.Fatalf("snapshot %s", s)
 	}
 	// Alphabet's two classes both count the balance-sheet total, never the
@@ -119,7 +119,11 @@ func TestSecbuild(t *testing.T) {
 	if c, ok := sf.Symbols["NVDA"]; !ok || c.Why != "none" {
 		t.Errorf("NVDA: %+v", c)
 	}
-	if _, ok := sf.Symbols["MISL"]; ok || len(sf.Symbols) != 4 {
+	// A preferred listing gets no count, and is not a second class of common stock for AAPL's.
+	if c := sf.Symbols["AAPL.P"]; c.N != nil || c.Why != "notcommon" {
+		t.Errorf("AAPL.P: %+v", c)
+	}
+	if _, ok := sf.Symbols["MISL"]; ok || len(sf.Symbols) != 5 {
 		t.Errorf("symbols %v", sf.Symbols)
 	}
 	if err := run(zpath, tpath, rpath, spath, out, now); err == nil {
@@ -265,7 +269,7 @@ func TestSecbuildAcceptance(t *testing.T) {
 	defer func(n int, m []string) { minShares, mustHaveShares = n, m }(minShares, mustHaveShares)
 	zpath, tpath, rpath, spath := fixture(t)
 	for name, set := range map[string]func(){
-		"too few":   func() { minFiles, mustHave = 5, []string{"AAPL"} },
+		"too few":   func() { minFiles, mustHave = 6, []string{"AAPL"} },
 		"missing":   func() { minFiles, mustHave = 1, []string{"MSFT"} },
 		"not fresh": func() { minFiles, mustHave = 1, []string{"AAPL"}; now = now.AddDate(1, 0, 0) },
 	} {

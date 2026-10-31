@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -40,7 +41,7 @@ type Shares struct {
 	Filed string   `json:"filed,omitempty"` // yyyy-mm-dd
 	Accn  string   `json:"accn,omitempty"`
 	How   string   `json:"how,omitempty"` // "cover" or "balance" (reviewed multi-class total)
-	Why   string   `json:"why,omitempty"` // only when N is null: none, classes, stale, check, depositary or nofloat
+	Why   string   `json:"why,omitempty"` // only when N is null: none, classes, stale, check, depositary or notcommon
 }
 
 // SharesClass is a reviewed company (shares-reviewed.json, by pull request
@@ -74,7 +75,7 @@ const (
 	weightedRatio = 2
 )
 
-var sharesWhys = map[string]bool{"none": true, "classes": true, "stale": true, "check": true, "depositary": true, "nofloat": true}
+var sharesWhys = map[string]bool{"none": true, "classes": true, "stale": true, "check": true, "depositary": true, "notcommon": true}
 
 type shareFact struct {
 	Start string  `json:"start"`
@@ -83,6 +84,12 @@ type shareFact struct {
 	Accn  string  `json:"accn"`
 	Form  string  `json:"form"`
 	Filed string  `json:"filed"`
+}
+
+// Preferred reports a symbol with the exchanges' preferred-stock class
+// letter (PHXE.P, ETI.P): its company's common shares are not what it trades.
+func Preferred(symbol string) bool {
+	return strings.HasSuffix(symbol, ".P")
 }
 
 // ExtractShares reads one company's companyfacts JSON for its share count.
@@ -149,7 +156,7 @@ func ExtractShares(b []byte, cik int64, classes int, balance bool, now time.Time
 		return Shares{}, err
 	}
 	if noFloat(float) {
-		return Shares{Why: "nofloat"}, nil
+		return Shares{Why: "notcommon"}, nil
 	}
 	best := newestCount(facts, now)
 	if best == nil {

@@ -221,7 +221,7 @@ func TestExtractSharesNoFloat(t *testing.T) {
 		vals []float64
 		want string
 	}{
-		"two zeros":         {[]float64{0, 0}, "nofloat"},
+		"two zeros":         {[]float64{0, 0}, "notcommon"},
 		"zero then a float": {[]float64{0, 5e9}, ""},
 		"a float then zero": {[]float64{5e9, 0}, ""},
 		"one zero (new)":    {[]float64{0}, ""},
@@ -232,6 +232,14 @@ func TestExtractSharesNoFloat(t *testing.T) {
 		}
 		if tc.want == "" && got.N == nil || tc.want != "" && got.Why != tc.want {
 			t.Errorf("%s: %+v", name, got)
+		}
+	}
+}
+
+func TestPreferred(t *testing.T) {
+	for sym, want := range map[string]bool{"PHXE.P": true, "ETI.P": true, "BRK.B": false, "AAPL": false, "P": false, "PP": false} {
+		if Preferred(sym) != want {
+			t.Errorf("%s: %v", sym, !want)
 		}
 	}
 }

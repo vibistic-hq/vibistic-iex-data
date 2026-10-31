@@ -133,6 +133,11 @@ func run(factsPath, tickersPath, reviewedPath, sharesReviewedPath, out string, n
 					fmt.Fprintf(os.Stderr, "secbuild: %s: share count: %v\n", e.Name, countErr)
 				} else if count.N != nil || count.Why != "" {
 					for _, sym := range byCIK[cik] {
+						if sec.Preferred(sym) {
+							// A preferred listing is not the company's common stock (Codex review: PHXE.P).
+							shares[sym] = sec.Shares{Why: "notcommon"}
+							continue
+						}
 						shares[sym] = count
 					}
 				}
@@ -197,7 +202,14 @@ func readEntry(e *zip.File, symbols []string, cik int64, balance bool, now time.
 	if b == nil {
 		return nil, sec.Shares{}, nil, err
 	}
-	count, countErr = sec.ExtractShares(b, cik, len(symbols), balance, now)
+	// Share classes of common stock: a preferred listing is not one.
+	classes := 0
+	for _, sym := range symbols {
+		if !sec.Preferred(sym) {
+			classes++
+		}
+	}
+	count, countErr = sec.ExtractShares(b, cik, classes, balance, now)
 	return files, count, countErr, err
 }
 
