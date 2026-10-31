@@ -278,7 +278,8 @@ func copyShares(path, dst string, filings *earnings.File, now time.Time) (map[st
 	if filings == nil {
 		return nil, fmt.Errorf("no earnings file to tell depositary shares by")
 	}
-	if err := earnings.ValidatePrivate(filings); err != nil {
+	filers, depositaryCIKs, err := earnings.PrivateLists(filings)
+	if err != nil {
 		return nil, fmt.Errorf("earnings file's filing lists: %w", err)
 	}
 	var f sec.SharesFile
@@ -293,7 +294,7 @@ func copyShares(path, dst string, filings *earnings.File, now time.Time) (map[st
 		return nil, fmt.Errorf("share counts from %s are too old or in the future", f.GeneratedAt)
 	}
 	depositary := map[int64]bool{}
-	for _, c := range filings.Depositary {
+	for _, c := range depositaryCIKs {
 		depositary[c] = true
 	}
 	counted, ads, unread := 0, 0, 0
@@ -308,7 +309,7 @@ func copyShares(path, dst string, filings *earnings.File, now time.Time) (map[st
 		// Read in full, and under the same symbol: the two files come from
 		// separate downloads of SEC's ticker list, a day apart at most, and a
 		// symbol that moved to another company in between gets no count.
-		case filings.Filers[sym] != s.CIK:
+		case filers[sym] != s.CIK:
 			f.Symbols[sym] = sec.Shares{Why: "check"}
 			unread++
 		default:
@@ -355,7 +356,7 @@ func copyEarnings(path, dst string, now time.Time) (map[string]any, *earnings.Fi
 		return nil, nil, fmt.Errorf("only %d symbols", len(f.Symbols))
 	}
 	// The estimates never wait on the share counts' lists: published without
-	// them, whatever they hold (ValidatePrivate is copyShares' concern).
+	// them, whatever they hold (PrivateLists is copyShares' concern).
 	pub := f
 	pub.Filers, pub.Depositary = nil, nil
 	if err := writeJSON(dst, &pub); err != nil {

@@ -473,7 +473,9 @@ func earningsWithFilers(t *testing.T, path string, filers map[string]int64, depo
 	var f earnings.File
 	b, _ := os.ReadFile(path)
 	json.Unmarshal(b, &f)
-	f.Filers, f.Depositary = filers, depositary
+	if filers != nil {
+		earnings.SetPrivate(&f, filers, depositary)
+	}
 	b, _ = json.Marshal(f)
 	os.WriteFile(path, b, 0o644)
 }
@@ -540,9 +542,18 @@ func TestRunPublishesShareCounts(t *testing.T) {
 		"no earnings": {good, nil},
 		"no filers":   {good, func(p string) { earningsWithFilers(t, p, nil, nil) }},
 		"bad lists":   {good, func(p string) { earningsWithFilers(t, p, map[string]int64{"AAPL": 320193}, []int64{9}) }},
+		// Lists of the wrong shape still let the estimates decode (Codex review).
+		"malformed lists": {good, func(p string) {
+			earningsWithFilers(t, p, nil, nil)
+			b, _ := os.ReadFile(p)
+			os.WriteFile(p, []byte(strings.Replace(string(b), `{"v":1`, `{"filers":[1],"depositary":["bad"],"v":1`, 1)), 0o644)
+		}},
 		"stale": {func(dir string) {
 			secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z")
-			sharesSnapshot(t, dir, "2026-09-20T09:30:00Z", map[string]sec.Shares{"AAPL": count(1, 320193)})
+			// Otherwise valid as of its own date, so only its age refuses it (Codex review).
+			c := count(1, 320193)
+			c.AsOf, c.Filed = "2026-09-10", "2026-09-15"
+			sharesSnapshot(t, dir, "2026-09-20T09:30:00Z", map[string]sec.Shares{"AAPL": c})
 		}, filers},
 		"invalid": {func(dir string) {
 			secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z")

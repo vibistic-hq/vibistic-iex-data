@@ -204,3 +204,34 @@ func TestValidateSharesSymbolCap(t *testing.T) {
 		t.Fatal("accepted more symbols than the app takes")
 	}
 }
+
+// No public market for the common shares in the last two 10-Ks (a listed
+// preferred or note): no count. A new listing's single zero is kept.
+func TestExtractSharesNoFloat(t *testing.T) {
+	good := "[" + instant("2026-07-17", 203805, accnB, "10-Q", "2026-07-31") + "]"
+	withFloat := func(vals ...float64) []byte {
+		var fs []string
+		for i, v := range vals {
+			fs = append(fs, fmt.Sprintf(`{"end":"%d-06-30","val":%v,"accn":"0000320193-%02d-000001","form":"10-K","filed":"%d-02-25"}`, 2024+i, v, 24+i, 2025+i))
+		}
+		b := companyFacts(good, "", "")
+		return []byte(strings.Replace(string(b), `"dei":{`, `"dei":{"EntityPublicFloat":{"units":{"USD":[`+strings.Join(fs, ",")+`]}},`, 1))
+	}
+	for name, tc := range map[string]struct {
+		vals []float64
+		want string
+	}{
+		"two zeros":         {[]float64{0, 0}, "nofloat"},
+		"zero then a float": {[]float64{0, 5e9}, ""},
+		"a float then zero": {[]float64{5e9, 0}, ""},
+		"one zero (new)":    {[]float64{0}, ""},
+	} {
+		got, err := ExtractShares(withFloat(tc.vals...), appleCIK, 1, false, sharesNow)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if tc.want == "" && got.N == nil || tc.want != "" && got.Why != tc.want {
+			t.Errorf("%s: %+v", name, got)
+		}
+	}
+}

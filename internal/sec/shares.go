@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"sort"
 	"time"
 )
 
@@ -39,7 +40,7 @@ type Shares struct {
 	Filed string   `json:"filed,omitempty"` // yyyy-mm-dd
 	Accn  string   `json:"accn,omitempty"`
 	How   string   `json:"how,omitempty"` // "cover" or "balance" (reviewed multi-class total)
-	Why   string   `json:"why,omitempty"` // only when N is null: none, classes, stale, check or depositary
+	Why   string   `json:"why,omitempty"` // only when N is null: none, classes, stale, check, depositary or nofloat
 }
 
 // SharesClass is a reviewed company (shares-reviewed.json, by pull request
@@ -73,7 +74,7 @@ const (
 	weightedRatio = 2
 )
 
-var sharesWhys = map[string]bool{"none": true, "classes": true, "stale": true, "check": true, "depositary": true}
+var sharesWhys = map[string]bool{"none": true, "classes": true, "stale": true, "check": true, "depositary": true, "nofloat": true}
 
 type shareFact struct {
 	Start string  `json:"start"`
@@ -138,6 +139,17 @@ func ExtractShares(b []byte, cik int64, classes int, balance bool, now time.Time
 	weighted, err := read(cf.Facts.USGAAP, "WeightedAverageNumberOfSharesOutstandingBasic")
 	if err != nil {
 		return Shares{}, err
+	}
+	// No public market for the common shares in the last two annual reports:
+	// the listed symbol is something else (a preferred stock or a note whose
+	// issuer's common stock is all held by a parent, Codex review: ATHS). One
+	// such report alone is a new listing's first 10-K, kept.
+	float, err := readUnit(cf.Facts.DEI, "EntityPublicFloat", "USD")
+	if err != nil {
+		return Shares{}, err
+	}
+	if noFloat(float) {
+		return Shares{Why: "nofloat"}, nil
 	}
 	best := newestCount(facts, now)
 	if best == nil {
@@ -217,6 +229,50 @@ func filingWeighted(facts []shareFact, accn string) (float64, bool) {
 		}
 	}
 	return val, best != ""
+}
+
+// readUnit is one concept's facts in one unit.
+func readUnit(m map[string]json.RawMessage, concept, unit string) ([]shareFact, error) {
+	raw, ok := m[concept]
+	if !ok {
+		return nil, nil
+	}
+	var c struct {
+		Units map[string][]shareFact `json:"units"`
+	}
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return nil, fmt.Errorf("%s: %w", concept, err)
+	}
+	return c.Units[unit], nil
+}
+
+// noFloat: the two newest annual reports (one value each, by filing) both
+// give a public float of zero.
+func noFloat(facts []shareFact) bool {
+	type annual struct {
+		filed, accn string
+		val         float64
+	}
+	by := map[string]annual{}
+	for _, f := range facts {
+		if (f.Form != "10-K" && f.Form != "10-KT") || !accnRe.MatchString(f.Accn) || !finite(f.Val) {
+			continue
+		}
+		if _, ok := by[f.Accn]; !ok {
+			by[f.Accn] = annual{f.Filed, f.Accn, f.Val}
+		}
+	}
+	list := make([]annual, 0, len(by))
+	for _, a := range by {
+		list = append(list, a)
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].filed != list[j].filed {
+			return list[i].filed > list[j].filed
+		}
+		return list[i].accn > list[j].accn
+	})
+	return len(list) >= 2 && list[0].val == 0 && list[1].val == 0
 }
 
 func wholeShares(v float64) bool {

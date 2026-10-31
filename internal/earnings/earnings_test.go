@@ -1,6 +1,7 @@
 package earnings
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -314,22 +315,28 @@ func TestValidateNoEstimate(t *testing.T) {
 
 // The share counts' lists (issue #18): whole CIKs, each once, depositary ones
 // among the filers.
-func TestValidateFilersAndDepositary(t *testing.T) {
+func TestPrivateLists(t *testing.T) {
 	f := goodFile()
-	f.Filers, f.Depositary = map[string]int64{"AAPL": 320193, "MREO": 1719714}, []int64{1719714}
-	if err := ValidatePrivate(f); err != nil {
-		t.Fatal(err)
+	SetPrivate(f, map[string]int64{"AAPL": 320193, "MREO": 1719714}, []int64{1719714})
+	filers, dep, err := PrivateLists(f)
+	if err != nil || filers["MREO"] != 1719714 || len(dep) != 1 {
+		t.Fatal(filers, dep, err)
 	}
 	for name, set := range map[string]func(f *File){
-		"no filers":              func(f *File) { f.Filers = nil },
-		"bad symbol":             func(f *File) { f.Filers = map[string]int64{"aapl": 1} },
-		"filer out of range":     func(f *File) { f.Filers = map[string]int64{"AAPL": 0} },
-		"depositary not a filer": func(f *File) { f.Filers, f.Depositary = map[string]int64{"AAPL": 1}, []int64{2} },
-		"depositary twice":       func(f *File) { f.Filers, f.Depositary = map[string]int64{"AAPL": 1}, []int64{1, 1} },
+		"no filers":              func(f *File) { f.Filers, f.Depositary = nil, nil },
+		"bad symbol":             func(f *File) { SetPrivate(f, map[string]int64{"aapl": 1}, nil) },
+		"filer out of range":     func(f *File) { SetPrivate(f, map[string]int64{"AAPL": 0}, nil) },
+		"depositary not a filer": func(f *File) { SetPrivate(f, map[string]int64{"AAPL": 1}, []int64{2}) },
+		"depositary twice":       func(f *File) { SetPrivate(f, map[string]int64{"AAPL": 1}, []int64{1, 1}) },
+		"filers a list":          func(f *File) { f.Filers = json.RawMessage(`[1]`) },
+		"depositary strings": func(f *File) {
+			SetPrivate(f, map[string]int64{"AAPL": 1}, nil)
+			f.Depositary = json.RawMessage(`["x"]`)
+		},
 	} {
 		f := goodFile()
 		set(f)
-		if ValidatePrivate(f) == nil {
+		if _, _, err := PrivateLists(f); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 		// The estimates stand on their own (Codex review).

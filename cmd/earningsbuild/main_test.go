@@ -110,7 +110,8 @@ func TestRun(t *testing.T) {
 		"OLDP": {CIK: 41, Next: "2026-10-29", Last: "2026-07-30", Basis: "2025-10-30"},
 	}
 	// Every company read in full, and the one with an F-6; not the one whose old page is missing.
-	if got := fmt.Sprint(f.Filers, f.Depositary); got != "map[AAPL:320193 ADSC:31 JPM:19617 NEWCO:21] [31]" {
+	filers, depositary, err := earnings.PrivateLists(&f)
+	if got := fmt.Sprint(filers, depositary, err); got != "map[AAPL:320193 ADSC:31 JPM:19617 NEWCO:21] [31] <nil>" {
 		t.Fatalf("filers, depositary = %s", got)
 	}
 	if len(f.Symbols) != len(want) {
@@ -254,6 +255,8 @@ func TestCompanyReleasesOldPages(t *testing.T) {
 		"unaligned":       []byte(`{"form":["10-K","F-6"],"filingDate":["2019-03-01"]}`),
 		"not json":        []byte(`{`),
 		"trailing object": append(append([]byte{}, f6...), []byte(`{}`)...),
+		"a null form":     []byte(`{"form":[null],"filingDate":["2019-03-01"]}`),
+		"empty object":    []byte(`{}`),
 	} {
 		n, _, comp, err := read(t, old)
 		if err != nil || n != 6 || comp {
@@ -268,6 +271,22 @@ func TestCompanyReleasesOldPages(t *testing.T) {
 		n, _, comp, err := read(t, big)
 		if err != nil || n != 6 || comp {
 			t.Fatalf("%d dates, complete %v, %v", n, comp, err)
+		}
+	})
+	t.Run("a page in the estimate's window, malformed, leaves the company incomplete", func(t *testing.T) {
+		for name, page := range map[string][]byte{"null": []byte("null"), "empty": []byte("{}")} {
+			z, _, _ := fixture(t, map[string][]byte{"CIK0000320193.json": sub(320193, recent, map[string]string{"name": newName, "filingTo": "2025-04-30"}), newName: page})
+			zr, _ := zip.OpenReader(z)
+			entries := map[string]*zip.File{}
+			for _, e := range zr.File {
+				entries[e.Name] = e
+			}
+			raw, _, _, comp, err := companyReleases(entries["CIK0000320193.json"], entries, 320193, earnings.NewYorkDay(now))
+			zr.Close()
+			// The estimate reads it as before (an empty page): only the share count is lost.
+			if err != nil || len(raw) != 5 || comp {
+				t.Errorf("%s: %d dates, complete %v, %v", name, len(raw), comp, err)
+			}
 		}
 	})
 }

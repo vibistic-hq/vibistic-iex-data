@@ -82,7 +82,9 @@ func run(subsPath, tickersPath, reviewedPath, out string, now time.Time) error {
 		entries[e.Name] = e
 	}
 	today := earnings.NewYorkDay(now)
-	f := &earnings.File{V: 1, Source: "SEC", GeneratedAt: now.UTC().Format(time.RFC3339), Today: today.Format("2006-01-02"), Symbols: map[string]earnings.Entry{}, NoEstimate: map[string][]string{}, Filers: map[string]int64{}}
+	f := &earnings.File{V: 1, Source: "SEC", GeneratedAt: now.UTC().Format(time.RFC3339), Today: today.Format("2006-01-02"), Symbols: map[string]earnings.Entry{}, NoEstimate: map[string][]string{}}
+	filers := map[string]int64{}
+	var depositaryCIKs []int64
 	var asOf time.Time
 	skipped := 0
 	for name, e := range entries {
@@ -108,11 +110,11 @@ func run(subsPath, tickersPath, reviewedPath, out string, now time.Time) error {
 		// could not be read; no F-6 counts only when every page was read.
 		if depositary || complete {
 			for _, sym := range byCIK[cik] {
-				f.Filers[sym] = cik
+				filers[sym] = cik
 			}
 		}
 		if depositary {
-			f.Depositary = append(f.Depositary, cik)
+			depositaryCIKs = append(depositaryCIKs, cik)
 		}
 		next, last, basis, why := earnings.Explain(raw, today)
 		if why != "" {
@@ -136,7 +138,10 @@ func run(subsPath, tickersPath, reviewedPath, out string, now time.Time) error {
 	for _, syms := range f.NoEstimate {
 		sort.Strings(syms)
 	}
-	sort.Slice(f.Depositary, func(i, j int) bool { return f.Depositary[i] < f.Depositary[j] })
+	sort.Slice(depositaryCIKs, func(i, j int) bool { return depositaryCIKs[i] < depositaryCIKs[j] })
+	if err := earnings.SetPrivate(f, filers, depositaryCIKs); err != nil {
+		return err
+	}
 	// Also refuses a newest filing over earnings.MaxSourceAge days old.
 	if err := earnings.Validate(f); err != nil {
 		return err
@@ -197,7 +202,7 @@ type submissions struct {
 // the older pages that reach back into the history used, and the newest filing
 // date of any form. Every page is read for one more thing: whether the
 // company ever filed a Form F-6 (depositary shares, issue #18).
-// complete says every page was read for that.
+// complete says every page was read for that and was well formed.
 func companyReleases(e *zip.File, entries map[string]*zip.File, cik int64, today time.Time) (raw []time.Time, newest time.Time, depositary, complete bool, err error) {
 	var sub submissions
 	if err := readJSON(e, &sub); err != nil {
@@ -233,7 +238,7 @@ func companyReleases(e *zip.File, entries map[string]*zip.File, cik int64, today
 		return nil, time.Time{}, false, false, err
 	}
 	f6(sub.Filings.Recent.Form)
-	if sub.Filings.Recent.Form == nil {
+	if !wellFormed(&sub.Filings.Recent) {
 		complete = false
 	}
 	prefix := fmt.Sprintf("CIK%010d-submissions-", cik)
@@ -264,7 +269,7 @@ func companyReleases(e *zip.File, entries map[string]*zip.File, cik int64, today
 			}
 			oldBudget -= pe.UncompressedSize64
 			var c *columns
-			if readJSON(pe, &c) != nil || c == nil || c.Form == nil || len(c.Form) != len(c.FilingDate) {
+			if readJSON(pe, &c) != nil || !wellFormed(c) {
 				complete = false
 				continue
 			}
@@ -278,9 +283,18 @@ func companyReleases(e *zip.File, entries map[string]*zip.File, cik int64, today
 			return nil, time.Time{}, false, false, fmt.Errorf("pages over %d bytes", maxCompany)
 		}
 		budget -= pe.UncompressedSize64
-		var c columns
-		if err := readJSON(pe, &c); err != nil {
+		var cp *columns
+		if err := readJSON(pe, &cp); err != nil {
 			return nil, time.Time{}, false, false, fmt.Errorf("%s: %w", p.Name, err)
+		}
+		// A null page reads as an empty one for the estimate, as before; only
+		// the depositary check needs it well formed.
+		if !wellFormed(cp) {
+			complete = false
+		}
+		var c columns
+		if cp != nil {
+			c = *cp
 		}
 		f6(c.Form)
 		if err := add(c); err != nil {
@@ -288,6 +302,21 @@ func companyReleases(e *zip.File, entries map[string]*zip.File, cik int64, today
 		}
 	}
 	return raw, newest, depositary, complete, nil
+}
+
+// wellFormed: a filings table whose forms can be trusted to be all there: a
+// form column (null decodes to an empty string, so none may be empty) as long
+// as its dates column.
+func wellFormed(c *columns) bool {
+	if c == nil || c.Form == nil || len(c.Form) != len(c.FilingDate) {
+		return false
+	}
+	for _, f := range c.Form {
+		if f == "" {
+			return false
+		}
+	}
+	return true
 }
 
 func parseCIK(raw json.RawMessage) (int64, error) {
