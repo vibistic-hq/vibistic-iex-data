@@ -110,7 +110,7 @@ func TestRun(t *testing.T) {
 		"OLDP": {CIK: 41, Next: "2026-10-29", Last: "2026-07-30", Basis: "2025-10-30"},
 	}
 	// Every company read in full, and the one with an F-6; not the one whose old page is missing.
-	if got := fmt.Sprint(f.Filers, f.Depositary); got != "[21 31 19617 320193] [31]" {
+	if got := fmt.Sprint(f.Filers, f.Depositary); got != "map[AAPL:320193 ADSC:31 JPM:19617 NEWCO:21] [31]" {
 		t.Fatalf("filers, depositary = %s", got)
 	}
 	if len(f.Symbols) != len(want) {
@@ -213,4 +213,61 @@ func TestRunSkipsUnalignedColumns(t *testing.T) {
 	if strings.Contains(string(b), "AAPL") {
 		t.Fatal("a company with unaligned columns got an estimate")
 	}
+}
+
+// Old pages (issue #18) are read for their forms only, on their own budget:
+// a malformed or unread one leaves the company incomplete, never short of its
+// estimate's pages (Codex review).
+func TestCompanyReleasesOldPages(t *testing.T) {
+	recent := releases("2025-07-31", "2025-10-30", "2026-01-29", "2026-04-30", "2026-07-30")
+	inWindow, _ := json.Marshal(releases("2025-04-30"))
+	oldName, newName := "CIK0000320193-submissions-002.json", "CIK0000320193-submissions-001.json"
+	read := func(t *testing.T, old []byte) (dates int, depositary, complete bool, err error) {
+		t.Helper()
+		// The old page is listed first, so it is read before the one the estimate needs.
+		pages := []map[string]string{{"name": oldName, "filingTo": "2019-06-30"}, {"name": newName, "filingTo": "2025-04-30"}}
+		files := map[string][]byte{"CIK0000320193.json": sub(320193, recent, pages...), newName: inWindow}
+		if old != nil {
+			files[oldName] = old
+		}
+		z, _, _ := fixture(t, files)
+		zr, err := zip.OpenReader(z)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer zr.Close()
+		entries := map[string]*zip.File{}
+		for _, e := range zr.File {
+			entries[e.Name] = e
+		}
+		raw, _, dep, comp, err := companyReleases(entries["CIK0000320193.json"], entries, 320193, earnings.NewYorkDay(now))
+		return len(raw), dep, comp, err
+	}
+	f6, _ := json.Marshal(table{Form: []string{"F-6"}, FilingDate: []string{"2019-03-01"}, Items: []string{""}})
+	if n, dep, comp, err := read(t, f6); err != nil || n != 6 || !dep || !comp {
+		t.Fatalf("an F-6 on an old page: %d %v %v %v", n, dep, comp, err)
+	}
+	for name, old := range map[string][]byte{
+		"missing":         nil,
+		"null":            []byte("null"),
+		"no form column":  []byte(`{"filingDate":["2019-03-01"]}`),
+		"unaligned":       []byte(`{"form":["10-K","F-6"],"filingDate":["2019-03-01"]}`),
+		"not json":        []byte(`{`),
+		"trailing object": append(append([]byte{}, f6...), []byte(`{}`)...),
+	} {
+		n, _, comp, err := read(t, old)
+		if err != nil || n != 6 || comp {
+			t.Errorf("%s: %d dates, complete %v, %v", name, n, comp, err)
+		}
+	}
+	t.Run("old pages have their own budget", func(t *testing.T) {
+		big, _ := json.Marshal(table{Form: make([]string, 2000), FilingDate: make([]string, 2000), Items: make([]string, 2000)})
+		// Enough for the estimate's page only: the bigger old page, read first, must not use it.
+		maxCompany = uint64(len(inWindow))
+		defer func() { maxCompany = 512 << 20 }()
+		n, _, comp, err := read(t, big)
+		if err != nil || n != 6 || comp {
+			t.Fatalf("%d dates, complete %v, %v", n, comp, err)
+		}
+	})
 }

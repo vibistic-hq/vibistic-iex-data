@@ -316,20 +316,25 @@ func TestValidateNoEstimate(t *testing.T) {
 // among the filers.
 func TestValidateFilersAndDepositary(t *testing.T) {
 	f := goodFile()
-	f.Filers, f.Depositary = []int64{320193, 1719714}, []int64{1719714}
-	if err := Validate(f); err != nil {
+	f.Filers, f.Depositary = map[string]int64{"AAPL": 320193, "MREO": 1719714}, []int64{1719714}
+	if err := ValidatePrivate(f); err != nil {
 		t.Fatal(err)
 	}
 	for name, set := range map[string]func(f *File){
-		"filer twice":            func(f *File) { f.Filers = []int64{1, 1} },
-		"filer out of range":     func(f *File) { f.Filers = []int64{0} },
-		"depositary not a filer": func(f *File) { f.Filers, f.Depositary = []int64{1}, []int64{2} },
-		"depositary twice":       func(f *File) { f.Filers, f.Depositary = []int64{1}, []int64{1, 1} },
+		"no filers":              func(f *File) { f.Filers = nil },
+		"bad symbol":             func(f *File) { f.Filers = map[string]int64{"aapl": 1} },
+		"filer out of range":     func(f *File) { f.Filers = map[string]int64{"AAPL": 0} },
+		"depositary not a filer": func(f *File) { f.Filers, f.Depositary = map[string]int64{"AAPL": 1}, []int64{2} },
+		"depositary twice":       func(f *File) { f.Filers, f.Depositary = map[string]int64{"AAPL": 1}, []int64{1, 1} },
 	} {
 		f := goodFile()
 		set(f)
-		if Validate(f) == nil {
+		if ValidatePrivate(f) == nil {
 			t.Errorf("%s: accepted", name)
+		}
+		// The estimates stand on their own (Codex review).
+		if err := Validate(f); err != nil {
+			t.Errorf("%s: the estimates refused: %v", name, err)
 		}
 	}
 }

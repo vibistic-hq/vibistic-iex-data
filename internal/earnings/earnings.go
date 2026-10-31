@@ -59,12 +59,14 @@ type File struct {
 	// Covered symbols without an estimate, by reason (one of Whys; issue #14).
 	// Optional: files from before it have none.
 	NoEstimate map[string][]string `json:"noEstimate,omitempty"`
-	// For the share counts (issue #18), never published: every company whose
-	// whole filing index was read (Filers), and those among them that ever
-	// registered depositary shares on Form F-6 (Depositary), whose US listing
-	// is an ADS, not the shares their 10-Q counts. Build strips both.
-	Filers     []int64 `json:"filers,omitempty"`
-	Depositary []int64 `json:"depositary,omitempty"`
+	// For the share counts (issue #18), never published: each symbol of a
+	// company whose whole filing index was read, with its CIK (Filers), and
+	// the companies among them that ever registered depositary shares on Form
+	// F-6 (Depositary), whose US listing is an ADS, not the shares their 10-Q
+	// counts. Build strips both; ValidatePrivate checks them, apart from the
+	// estimates.
+	Filers     map[string]int64 `json:"filers,omitempty"`
+	Depositary []int64          `json:"depositary,omitempty"`
 }
 
 // Entry is one symbol's estimate.
@@ -285,19 +287,28 @@ func Validate(f *File) error {
 	if n > MaxSymbols {
 		return fmt.Errorf("%d symbols", n)
 	}
-	filers := map[int64]bool{}
-	for _, c := range f.Filers {
-		if c < 1 || c > 9999999999 || filers[c] {
-			return fmt.Errorf("filers: cik %d", c)
-		}
-		filers[c] = true
+	return nil
+}
+
+// ValidatePrivate checks the share counts' lists: a bad one costs the share
+// counts only, never the estimates.
+func ValidatePrivate(f *File) error {
+	if len(f.Filers) == 0 || len(f.Filers) > MaxSymbols {
+		return fmt.Errorf("%d filers", len(f.Filers))
 	}
-	seenDep := map[int64]bool{}
+	ciks := map[int64]bool{}
+	for s, c := range f.Filers {
+		if !symbolRe.MatchString(s) || c < 1 || c > 9999999999 {
+			return fmt.Errorf("filers: %q cik %d", s, c)
+		}
+		ciks[c] = true
+	}
+	seen := map[int64]bool{}
 	for _, c := range f.Depositary {
-		if !filers[c] || seenDep[c] {
+		if !ciks[c] || seen[c] {
 			return fmt.Errorf("depositary: cik %d", c)
 		}
-		seenDep[c] = true
+		seen[c] = true
 	}
 	return nil
 }

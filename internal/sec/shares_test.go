@@ -184,3 +184,23 @@ func TestValidateSharesClasses(t *testing.T) {
 		}
 	}
 }
+
+// One document only: bytes the revenue reader refused for trailing data give
+// no count either (Codex review).
+func TestExtractSharesRefusesTrailingData(t *testing.T) {
+	b := companyFacts("["+instant("2026-07-17", 100, accnB, "10-Q", "2026-07-31")+"]", "", "")
+	if _, err := ExtractShares(append(b, []byte(`{"cik":1}`)...), appleCIK, 1, false, sharesNow); err == nil {
+		t.Fatal("accepted a second document")
+	}
+}
+
+// The app refuses a file with more symbols than this whole (Codex review).
+func TestValidateSharesSymbolCap(t *testing.T) {
+	f := &SharesFile{V: 1, Source: "SEC", GeneratedAt: "2026-10-18T09:00:00Z", Symbols: map[string]Shares{}}
+	for i := 0; len(f.Symbols) <= MaxShareSymbols; i++ {
+		f.Symbols[string(rune('A'+i/676%26))+string(rune('A'+i/26%26))+string(rune('A'+i%26))+string(rune('A'+i/17576%26))] = Shares{Why: "none"}
+	}
+	if ValidateShares(f) == nil {
+		t.Fatal("accepted more symbols than the app takes")
+	}
+}

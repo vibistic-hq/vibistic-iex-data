@@ -56,12 +56,15 @@ func run(factsPath, tickersPath, reviewedPath, sharesReviewedPath, out string, n
 	if err := readReviewed(reviewedPath, &reviewed); err != nil {
 		return err
 	}
+	// A bad shares-reviewed.json costs the share counts only (Codex review).
+	sharesOK := true
 	var sharesReviewed []sec.SharesClass
 	if err := readReviewed(sharesReviewedPath, &sharesReviewed); err != nil {
-		return err
-	}
-	if err := sec.ValidateSharesClasses(sharesReviewed); err != nil {
-		return fmt.Errorf("%s: %w", sharesReviewedPath, err)
+		fmt.Fprintf(os.Stderr, "secbuild: share counts left out: %v\n", err)
+		sharesOK = false
+	} else if err := sec.ValidateSharesClasses(sharesReviewed); err != nil {
+		fmt.Fprintf(os.Stderr, "secbuild: share counts left out: %s: %v\n", sharesReviewedPath, err)
+		sharesOK = false
 	}
 	balance := map[int64]bool{}
 	for _, c := range sharesReviewed {
@@ -164,12 +167,15 @@ func run(factsPath, tickersPath, reviewedPath, sharesReviewedPath, out string, n
 	// The share counts are left out alone: the revenue and net income files
 	// never wait on them (Codex review).
 	sf := &sec.SharesFile{V: 1, Source: "SEC", GeneratedAt: now.UTC().Format(time.RFC3339), Symbols: shares}
-	if err := sec.ValidateShares(sf); err != nil {
-		fmt.Fprintf(os.Stderr, "secbuild: share counts left out: %v\n", err)
-	} else if err := acceptShares(shares); err != nil {
-		fmt.Fprintf(os.Stderr, "secbuild: share counts left out: %v\n", err)
-	} else if err := writeJSON(filepath.Join(out, "shares.json"), sf); err != nil {
-		return err
+	if sharesOK {
+		if err := sec.ValidateShares(sf); err != nil {
+			fmt.Fprintf(os.Stderr, "secbuild: share counts left out: %v\n", err)
+		} else if err := acceptShares(shares); err != nil {
+			fmt.Fprintf(os.Stderr, "secbuild: share counts left out: %v\n", err)
+		} else if err := writeJSON(filepath.Join(out, "shares.json"), sf); err != nil {
+			fmt.Fprintf(os.Stderr, "secbuild: share counts left out: %v\n", err)
+			os.Remove(filepath.Join(out, "shares.json"))
+		}
 	}
 	syms := make([]string, 0, len(files))
 	for s, f := range files {

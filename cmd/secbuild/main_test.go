@@ -190,10 +190,25 @@ func TestSecbuildReviewedFile(t *testing.T) {
 			t.Errorf("%s accepted", doc)
 		}
 	}
-	for _, doc := range []string{`[{"cik":1652044,"name":"Alphabet","note":"x"}]`, `[{"cik":1652044}]`, `[{"cik":0,"name":"x"}]`, `{`} {
-		os.WriteFile(bad, []byte(doc), 0o644)
-		if err := run(zpath, tpath, rpath, bad, filepath.Join(t.TempDir(), "sec"), now); err == nil {
-			t.Errorf("shares-reviewed %s accepted", doc)
+	// A bad shares-reviewed.json (or none) costs the share counts only (Codex review).
+	defer func(n int, m []string) { minFiles, mustHave = n, m }(minFiles, mustHave)
+	minFiles, mustHave = 1, []string{"AAPL"}
+	for _, doc := range []string{`[{"cik":1652044,"name":"Alphabet","note":"x"}]`, `[{"cik":1652044}]`, `[{"cik":0,"name":"x"}]`, `{`, ""} {
+		path := bad
+		if doc == "" {
+			path = filepath.Join(t.TempDir(), "missing.json")
+		} else {
+			os.WriteFile(bad, []byte(doc), 0o644)
+		}
+		out := filepath.Join(t.TempDir(), "sec")
+		if err := run(zpath, tpath, rpath, path, out, now); err != nil {
+			t.Errorf("shares-reviewed %q: %v", doc, err)
+		}
+		if _, err := os.Stat(filepath.Join(out, "shares.json")); !os.IsNotExist(err) {
+			t.Errorf("shares-reviewed %q: shares.json written", doc)
+		}
+		if _, err := os.Stat(filepath.Join(out, "AAPL.json")); err != nil {
+			t.Errorf("shares-reviewed %q: %v", doc, err)
 		}
 	}
 }

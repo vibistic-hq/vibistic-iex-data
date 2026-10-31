@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"time"
 )
@@ -61,6 +62,9 @@ func ValidateSharesClasses(cs []SharesClass) error {
 	return nil
 }
 
+// MaxShareSymbols is the app's own limit (src/sec/shares.ts MAX_SYMBOLS).
+const MaxShareSymbols = 12000
+
 const (
 	sharesMaxAge = 200 // days from the count's date to the snapshot
 	maxShares    = 1e12
@@ -91,8 +95,12 @@ func ExtractShares(b []byte, cik int64, classes int, balance bool, now time.Time
 			USGAAP map[string]json.RawMessage `json:"us-gaap"`
 		} `json:"facts"`
 	}
-	if err := json.NewDecoder(bytes.NewReader(b)).Decode(&cf); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	if err := dec.Decode(&cf); err != nil {
 		return Shares{}, err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return Shares{}, fmt.Errorf("data after the document")
 	}
 	if got, err := parseCIK(cf.CIK); err != nil || got != cik {
 		return Shares{}, fmt.Errorf("cik %.64q in a file for %d", cf.CIK, cik)
@@ -224,6 +232,10 @@ func ValidateShares(f *SharesFile) error {
 	gen, err := time.Parse(time.RFC3339, f.GeneratedAt)
 	if err != nil {
 		return fmt.Errorf("generatedAt: %w", err)
+	}
+	// The app refuses a bigger file whole.
+	if len(f.Symbols) > MaxShareSymbols {
+		return fmt.Errorf("%d symbols", len(f.Symbols))
 	}
 	for sym, s := range f.Symbols {
 		if err := validateShares(s, gen); err != nil {

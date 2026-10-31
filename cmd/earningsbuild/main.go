@@ -82,7 +82,7 @@ func run(subsPath, tickersPath, reviewedPath, out string, now time.Time) error {
 		entries[e.Name] = e
 	}
 	today := earnings.NewYorkDay(now)
-	f := &earnings.File{V: 1, Source: "SEC", GeneratedAt: now.UTC().Format(time.RFC3339), Today: today.Format("2006-01-02"), Symbols: map[string]earnings.Entry{}, NoEstimate: map[string][]string{}}
+	f := &earnings.File{V: 1, Source: "SEC", GeneratedAt: now.UTC().Format(time.RFC3339), Today: today.Format("2006-01-02"), Symbols: map[string]earnings.Entry{}, NoEstimate: map[string][]string{}, Filers: map[string]int64{}}
 	var asOf time.Time
 	skipped := 0
 	for name, e := range entries {
@@ -107,7 +107,9 @@ func run(subsPath, tickersPath, reviewedPath, out string, now time.Time) error {
 		// A depositary listing seen on any page counts even if another page
 		// could not be read; no F-6 counts only when every page was read.
 		if depositary || complete {
-			f.Filers = append(f.Filers, cik)
+			for _, sym := range byCIK[cik] {
+				f.Filers[sym] = cik
+			}
 		}
 		if depositary {
 			f.Depositary = append(f.Depositary, cik)
@@ -134,7 +136,6 @@ func run(subsPath, tickersPath, reviewedPath, out string, now time.Time) error {
 	for _, syms := range f.NoEstimate {
 		sort.Strings(syms)
 	}
-	sort.Slice(f.Filers, func(i, j int) bool { return f.Filers[i] < f.Filers[j] })
 	sort.Slice(f.Depositary, func(i, j int) bool { return f.Depositary[i] < f.Depositary[j] })
 	// Also refuses a newest filing over earnings.MaxSourceAge days old.
 	if err := earnings.Validate(f); err != nil {
@@ -232,9 +233,13 @@ func companyReleases(e *zip.File, entries map[string]*zip.File, cik int64, today
 		return nil, time.Time{}, false, false, err
 	}
 	f6(sub.Filings.Recent.Form)
+	if sub.Filings.Recent.Form == nil {
+		complete = false
+	}
 	prefix := fmt.Sprintf("CIK%010d-submissions-", cik)
 	seen := map[string]bool{}
 	var budget uint64 = maxCompany
+	var oldBudget uint64 = maxCompany
 	for _, p := range sub.Filings.Files {
 		// A page of this company only, listed once, with a real last filing
 		// date: a page left out must be known to end before the history used.
@@ -251,12 +256,18 @@ func companyReleases(e *zip.File, entries map[string]*zip.File, cik int64, today
 		// its forms: one missing, too big or unreadable leaves the company's
 		// depositary shares unknown (no share count then), not its estimate.
 		if to.Before(from) {
-			var c columns
-			if pe == nil || pe.UncompressedSize64 > budget || readJSON(pe, &c) != nil {
+			// Their own budget, charged before reading (a read that fails
+			// still cost it), so the estimate's pages never go short.
+			if pe == nil || pe.UncompressedSize64 > oldBudget {
 				complete = false
 				continue
 			}
-			budget -= pe.UncompressedSize64
+			oldBudget -= pe.UncompressedSize64
+			var c *columns
+			if readJSON(pe, &c) != nil || c == nil || c.Form == nil || len(c.Form) != len(c.FilingDate) {
+				complete = false
+				continue
+			}
 			f6(c.Form)
 			continue
 		}

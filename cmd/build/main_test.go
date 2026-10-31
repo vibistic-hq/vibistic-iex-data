@@ -467,7 +467,7 @@ func count(n float64, cik int64) sec.Shares {
 
 // earningsWithFilers writes an earnings file whose filings index covers
 // filers, depositary among them.
-func earningsWithFilers(t *testing.T, path string, filers, depositary []int64) {
+func earningsWithFilers(t *testing.T, path string, filers map[string]int64, depositary []int64) {
 	t.Helper()
 	earningsFile(t, path, "2026-10-09T09:30:00Z", earnings.MinSymbols)
 	var f earnings.File
@@ -503,9 +503,12 @@ func TestRunPublishesShareCounts(t *testing.T) {
 	}
 	good := func(dir string) {
 		secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z")
-		sharesSnapshot(t, dir, "2026-10-09T09:30:00Z", map[string]sec.Shares{"AAPL": count(14594180000, 320193), "MREO": count(798454864, 1719714), "NEWCO": count(5000000, 21), "META": {Why: "none"}})
+		// REUSE's symbol is another company's in the earnings file's ticker list (a day apart).
+		sharesSnapshot(t, dir, "2026-10-09T09:30:00Z", map[string]sec.Shares{"AAPL": count(14594180000, 320193), "MREO": count(798454864, 1719714), "NEWCO": count(5000000, 21), "REUSE": count(7000000, 55), "META": {Why: "none"}})
 	}
-	filers := func(p string) { earningsWithFilers(t, p, []int64{320193, 1719714}, []int64{1719714}) }
+	filers := func(p string) {
+		earningsWithFilers(t, p, map[string]int64{"AAPL": 320193, "MREO": 1719714, "REUSE": 66, "OTHER": 55}, []int64{1719714})
+	}
 	t.Run("good", func(t *testing.T) {
 		out := build(t, good, filers)
 		var f sec.SharesFile
@@ -513,7 +516,7 @@ func TestRunPublishesShareCounts(t *testing.T) {
 			t.Fatal(err)
 		}
 		// An ADS issuer and a company whose filings were not all read get no count.
-		if a := f.Symbols["AAPL"]; a.N == nil || *a.N != 14594180000 || f.Symbols["MREO"].Why != "depositary" || f.Symbols["NEWCO"].Why != "check" || f.Symbols["META"].Why != "none" {
+		if a := f.Symbols["AAPL"]; a.N == nil || *a.N != 14594180000 || f.Symbols["MREO"].Why != "depositary" || f.Symbols["NEWCO"].Why != "check" || f.Symbols["REUSE"].Why != "check" || f.Symbols["META"].Why != "none" {
 			t.Fatalf("symbols %+v", f.Symbols)
 		}
 		if _, err := os.Stat(filepath.Join(out, "v1", "sec", "shares.json")); !os.IsNotExist(err) {
@@ -525,7 +528,7 @@ func TestRunPublishesShareCounts(t *testing.T) {
 			t.Fatalf("earnings.json kept the lists: %.200s", e)
 		}
 		m, _ := os.ReadFile(filepath.Join(out, "v1", "manifest.json"))
-		if !strings.Contains(string(m), `"shares":{"counted":1,"generatedAt":"2026-10-09T09:30:00Z","source":"SEC","symbols":4}`) || !strings.Contains(string(m), `"sec":{"files":1`) {
+		if !strings.Contains(string(m), `"shares":{"counted":1,"generatedAt":"2026-10-09T09:30:00Z","source":"SEC","symbols":5}`) || !strings.Contains(string(m), `"sec":{"files":1`) {
 			t.Fatalf("manifest = %s", m)
 		}
 	})
@@ -536,6 +539,7 @@ func TestRunPublishesShareCounts(t *testing.T) {
 		"missing":     {func(dir string) { secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z") }, filers},
 		"no earnings": {good, nil},
 		"no filers":   {good, func(p string) { earningsWithFilers(t, p, nil, nil) }},
+		"bad lists":   {good, func(p string) { earningsWithFilers(t, p, map[string]int64{"AAPL": 320193}, []int64{9}) }},
 		"stale": {func(dir string) {
 			secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z")
 			sharesSnapshot(t, dir, "2026-09-20T09:30:00Z", map[string]sec.Shares{"AAPL": count(1, 320193)})
@@ -556,9 +560,14 @@ func TestRunPublishesShareCounts(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(out, "v1", "shares.json")); !os.IsNotExist(err) {
 				t.Fatalf("v1/shares.json published: %v", err)
 			}
-			// The SEC files do not depend on it.
+			// The SEC files and the estimates do not depend on it.
 			if _, err := os.Stat(filepath.Join(out, "v1", "sec", "AAPL.json")); err != nil {
 				t.Fatal(err)
+			}
+			if tc.withEarnings != nil {
+				if _, err := os.Stat(filepath.Join(out, "v1", "earnings.json")); err != nil {
+					t.Fatal(err)
+				}
 			}
 		})
 	}
