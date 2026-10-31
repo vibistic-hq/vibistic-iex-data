@@ -59,6 +59,12 @@ type File struct {
 	// Covered symbols without an estimate, by reason (one of Whys; issue #14).
 	// Optional: files from before it have none.
 	NoEstimate map[string][]string `json:"noEstimate,omitempty"`
+	// For the share counts (issue #18), never published: every company whose
+	// whole filing index was read (Filers), and those among them that ever
+	// registered depositary shares on Form F-6 (Depositary), whose US listing
+	// is an ADS, not the shares their 10-Q counts. Build strips both.
+	Filers     []int64 `json:"filers,omitempty"`
+	Depositary []int64 `json:"depositary,omitempty"`
 }
 
 // Entry is one symbol's estimate.
@@ -278,6 +284,20 @@ func Validate(f *File) error {
 	}
 	if n > MaxSymbols {
 		return fmt.Errorf("%d symbols", n)
+	}
+	filers := map[int64]bool{}
+	for _, c := range f.Filers {
+		if c < 1 || c > 9999999999 || filers[c] {
+			return fmt.Errorf("filers: cik %d", c)
+		}
+		filers[c] = true
+	}
+	seenDep := map[int64]bool{}
+	for _, c := range f.Depositary {
+		if !filers[c] || seenDep[c] {
+			return fmt.Errorf("depositary: cik %d", c)
+		}
+		seenDep[c] = true
 	}
 	return nil
 }

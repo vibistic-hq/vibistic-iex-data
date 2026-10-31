@@ -94,7 +94,7 @@ func run(subsPath, tickersPath, reviewedPath, out string, now time.Time) error {
 		if len(byCIK[cik]) == 0 {
 			continue
 		}
-		raw, newest, err := companyReleases(e, entries, cik, today)
+		raw, newest, depositary, complete, err := companyReleases(e, entries, cik, today)
 		if err != nil {
 			// One company's bad index skips that company, not the snapshot.
 			fmt.Fprintf(os.Stderr, "earningsbuild: %s: %v\n", name, err)
@@ -103,6 +103,14 @@ func run(subsPath, tickersPath, reviewedPath, out string, now time.Time) error {
 		}
 		if newest.After(asOf) {
 			asOf = newest
+		}
+		// A depositary listing seen on any page counts even if another page
+		// could not be read; no F-6 counts only when every page was read.
+		if depositary || complete {
+			f.Filers = append(f.Filers, cik)
+		}
+		if depositary {
+			f.Depositary = append(f.Depositary, cik)
 		}
 		next, last, basis, why := earnings.Explain(raw, today)
 		if why != "" {
@@ -126,6 +134,8 @@ func run(subsPath, tickersPath, reviewedPath, out string, now time.Time) error {
 	for _, syms := range f.NoEstimate {
 		sort.Strings(syms)
 	}
+	sort.Slice(f.Filers, func(i, j int) bool { return f.Filers[i] < f.Filers[j] })
+	sort.Slice(f.Depositary, func(i, j int) bool { return f.Depositary[i] < f.Depositary[j] })
 	// Also refuses a newest filing over earnings.MaxSourceAge days old.
 	if err := earnings.Validate(f); err != nil {
 		return err
@@ -184,18 +194,26 @@ type submissions struct {
 
 // companyReleases reads a company's Item 2.02 filing dates from its index and
 // the older pages that reach back into the history used, and the newest filing
-// date of any form.
-func companyReleases(e *zip.File, entries map[string]*zip.File, cik int64, today time.Time) ([]time.Time, time.Time, error) {
+// date of any form. Every page is read for one more thing: whether the
+// company ever filed a Form F-6 (depositary shares, issue #18).
+// complete says every page was read for that.
+func companyReleases(e *zip.File, entries map[string]*zip.File, cik int64, today time.Time) (raw []time.Time, newest time.Time, depositary, complete bool, err error) {
 	var sub submissions
 	if err := readJSON(e, &sub); err != nil {
-		return nil, time.Time{}, err
+		return nil, time.Time{}, false, false, err
 	}
 	if got, err := parseCIK(sub.CIK); err != nil || got != cik {
-		return nil, time.Time{}, fmt.Errorf("cik %.64q in the file for %d", sub.CIK, cik)
+		return nil, time.Time{}, false, false, fmt.Errorf("cik %.64q in the file for %d", sub.CIK, cik)
+	}
+	complete = true
+	f6 := func(forms []string) {
+		for _, f := range forms {
+			if strings.HasPrefix(f, "F-6") {
+				depositary = true
+			}
+		}
 	}
 	from := today.Add(-earnings.HistoryDays * 24 * time.Hour)
-	var raw []time.Time
-	var newest time.Time
 	// Each table is reduced to its dates as soon as it is read (none is kept).
 	add := func(c columns) error {
 		ds, err := earnings.Releases(c.Form, c.FilingDate, c.Items)
@@ -211,8 +229,9 @@ func companyReleases(e *zip.File, entries map[string]*zip.File, cik int64, today
 		return nil
 	}
 	if err := add(sub.Filings.Recent); err != nil {
-		return nil, time.Time{}, err
+		return nil, time.Time{}, false, false, err
 	}
+	f6(sub.Filings.Recent.Form)
 	prefix := fmt.Sprintf("CIK%010d-submissions-", cik)
 	seen := map[string]bool{}
 	var budget uint64 = maxCompany
@@ -220,33 +239,44 @@ func companyReleases(e *zip.File, entries map[string]*zip.File, cik int64, today
 		// A page of this company only, listed once, with a real last filing
 		// date: a page left out must be known to end before the history used.
 		if !strings.HasPrefix(p.Name, prefix) || !pageRe.MatchString(p.Name) || seen[p.Name] {
-			return nil, time.Time{}, fmt.Errorf("page %q", p.Name)
+			return nil, time.Time{}, false, false, fmt.Errorf("page %q", p.Name)
 		}
 		seen[p.Name] = true
 		to, err := earnings.ParseDate(p.FilingTo)
 		if err != nil {
-			return nil, time.Time{}, fmt.Errorf("page %s: filingTo: %w", p.Name, err)
-		}
-		if to.Before(from) {
-			continue
+			return nil, time.Time{}, false, false, fmt.Errorf("page %s: filingTo: %w", p.Name, err)
 		}
 		pe := entries[p.Name]
+		// A page that ends before the history used gives no release dates, only
+		// its forms: one missing, too big or unreadable leaves the company's
+		// depositary shares unknown (no share count then), not its estimate.
+		if to.Before(from) {
+			var c columns
+			if pe == nil || pe.UncompressedSize64 > budget || readJSON(pe, &c) != nil {
+				complete = false
+				continue
+			}
+			budget -= pe.UncompressedSize64
+			f6(c.Form)
+			continue
+		}
 		if pe == nil {
-			return nil, time.Time{}, fmt.Errorf("page %s missing", p.Name)
+			return nil, time.Time{}, false, false, fmt.Errorf("page %s missing", p.Name)
 		}
 		if pe.UncompressedSize64 > budget {
-			return nil, time.Time{}, fmt.Errorf("pages over %d bytes", maxCompany)
+			return nil, time.Time{}, false, false, fmt.Errorf("pages over %d bytes", maxCompany)
 		}
 		budget -= pe.UncompressedSize64
 		var c columns
 		if err := readJSON(pe, &c); err != nil {
-			return nil, time.Time{}, fmt.Errorf("%s: %w", p.Name, err)
+			return nil, time.Time{}, false, false, fmt.Errorf("%s: %w", p.Name, err)
 		}
+		f6(c.Form)
 		if err := add(c); err != nil {
-			return nil, time.Time{}, fmt.Errorf("%s: %w", p.Name, err)
+			return nil, time.Time{}, false, false, fmt.Errorf("%s: %w", p.Name, err)
 		}
 	}
-	return raw, newest, nil
+	return raw, newest, depositary, complete, nil
 }
 
 func parseCIK(raw json.RawMessage) (int64, error) {

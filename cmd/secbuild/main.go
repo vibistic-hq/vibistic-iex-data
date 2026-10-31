@@ -114,7 +114,7 @@ func run(factsPath, tickersPath, reviewedPath, sharesReviewedPath, out string, n
 			for e := range entries {
 				m := entryRe.FindStringSubmatch(e.Name)
 				cik, _ := strconv.ParseInt(m[1], 10, 64)
-				got, count, err := readEntry(e, byCIK[cik], cik, balance[cik], now)
+				got, count, countErr, err := readEntry(e, byCIK[cik], cik, balance[cik], now)
 				mu.Lock()
 				if err != nil {
 					// One company's bad file skips that company, not the snapshot.
@@ -124,7 +124,11 @@ func run(factsPath, tickersPath, reviewedPath, sharesReviewedPath, out string, n
 				for _, f := range got {
 					files[f.Symbol] = f
 				}
-				if err == nil {
+				// A company whose count could not be read has none; its
+				// revenue and net income stand on their own.
+				if countErr != nil {
+					fmt.Fprintf(os.Stderr, "secbuild: %s: share count: %v\n", e.Name, countErr)
+				} else if count.N != nil || count.Why != "" {
 					for _, sym := range byCIK[cik] {
 						shares[sym] = count
 					}
@@ -157,14 +161,14 @@ func run(factsPath, tickersPath, reviewedPath, sharesReviewedPath, out string, n
 	if err := accept(files, now); err != nil {
 		return err
 	}
+	// The share counts are left out alone: the revenue and net income files
+	// never wait on them (Codex review).
 	sf := &sec.SharesFile{V: 1, Source: "SEC", GeneratedAt: now.UTC().Format(time.RFC3339), Symbols: shares}
-	if err := sec.ValidateShares(sf, false); err != nil {
-		return fmt.Errorf("shares: %w", err)
-	}
-	if err := acceptShares(shares); err != nil {
-		return err
-	}
-	if err := writeJSON(filepath.Join(out, "shares.json"), sf); err != nil {
+	if err := sec.ValidateShares(sf); err != nil {
+		fmt.Fprintf(os.Stderr, "secbuild: share counts left out: %v\n", err)
+	} else if err := acceptShares(shares); err != nil {
+		fmt.Fprintf(os.Stderr, "secbuild: share counts left out: %v\n", err)
+	} else if err := writeJSON(filepath.Join(out, "shares.json"), sf); err != nil {
 		return err
 	}
 	syms := make([]string, 0, len(files))
@@ -181,17 +185,14 @@ func run(factsPath, tickersPath, reviewedPath, sharesReviewedPath, out string, n
 }
 
 // readEntry extracts one company's facts once, for each of its symbols, and
-// its share count.
-func readEntry(e *zip.File, symbols []string, cik int64, balance bool, now time.Time) ([]*sec.File, sec.Shares, error) {
+// its share count; a failure of either leaves the other.
+func readEntry(e *zip.File, symbols []string, cik int64, balance bool, now time.Time) (files []*sec.File, count sec.Shares, countErr, err error) {
 	files, b, err := readFiles(e, symbols, cik, now)
-	if err != nil {
-		return nil, sec.Shares{}, err
+	if b == nil {
+		return nil, sec.Shares{}, nil, err
 	}
-	count, err := sec.ExtractShares(b, len(symbols), balance, now)
-	if err != nil {
-		return nil, sec.Shares{}, err
-	}
-	return files, count, nil
+	count, countErr = sec.ExtractShares(b, cik, len(symbols), balance, now)
+	return files, count, countErr, err
 }
 
 func readFiles(e *zip.File, symbols []string, cik int64, now time.Time) ([]*sec.File, []byte, error) {
@@ -209,23 +210,25 @@ func readFiles(e *zip.File, symbols []string, cik int64, now time.Time) ([]*sec.
 	if len(b) > maxEntry {
 		return nil, nil, fmt.Errorf("over %d bytes", maxEntry)
 	}
+	// From here on the bytes are whole and checked: they go back with any
+	// error, for the share count.
 	f, err := sec.Extract(bytes.NewReader(b), symbols[0], now)
 	if err != nil {
-		return nil, nil, err
+		return nil, b, err
 	}
 	// No revenue or net income to publish; the share count may still be there.
 	if f == nil {
 		return nil, b, nil
 	}
 	if f.CIK != cik {
-		return nil, nil, fmt.Errorf("cik %d in a file named for %d", f.CIK, cik)
+		return nil, b, fmt.Errorf("cik %d in a file named for %d", f.CIK, cik)
 	}
 	var out []*sec.File
 	for _, sym := range symbols {
 		c := *f
 		c.Symbol = sym
 		if err := sec.Validate(&c); err != nil {
-			return nil, nil, fmt.Errorf("%s: %w", sym, err)
+			return nil, b, fmt.Errorf("%s: %w", sym, err)
 		}
 		out = append(out, &c)
 	}

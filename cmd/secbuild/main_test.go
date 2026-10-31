@@ -108,7 +108,7 @@ func TestSecbuild(t *testing.T) {
 	// one class's cover count; NVDA has no count; MISL's file was refused.
 	var sf sec.SharesFile
 	b, _ = os.ReadFile(filepath.Join(out, "shares.json"))
-	if err := json.Unmarshal(b, &sf); err != nil || sec.ValidateShares(&sf, false) != nil {
+	if err := json.Unmarshal(b, &sf); err != nil || sec.ValidateShares(&sf) != nil {
 		t.Fatalf("shares.json: %v %s", err, b)
 	}
 	for sym, want := range map[string]float64{"AAPL": 14594180000, "GOOGL": 12230000000, "GOOG": 12230000000} {
@@ -198,6 +198,33 @@ func TestSecbuildReviewedFile(t *testing.T) {
 	}
 }
 
+// Share counts that fail their acceptance are left out, alone: the revenue
+// and net income files are still written (Codex review).
+func TestSecbuildLeavesOutUnacceptedShareCounts(t *testing.T) {
+	defer func(n int, m []string) { minFiles, mustHave = n, m }(minFiles, mustHave)
+	defer func(n int, m []string) { minShares, mustHaveShares = n, m }(minShares, mustHaveShares)
+	zpath, tpath, rpath, spath := fixture(t)
+	for name, set := range map[string]func(){
+		"too few counts": func() { minShares, mustHaveShares = 4, nil },
+		"count missing":  func() { minShares, mustHaveShares = 0, []string{"NVDA"} },
+	} {
+		minFiles, mustHave = 1, []string{"AAPL"}
+		set()
+		out := filepath.Join(t.TempDir(), "sec")
+		if err := run(zpath, tpath, rpath, spath, out, now); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if _, err := os.Stat(filepath.Join(out, "shares.json")); !os.IsNotExist(err) {
+			t.Errorf("%s: shares.json written", name)
+		}
+		for _, f := range []string{"AAPL.json", "snapshot.json"} {
+			if _, err := os.Stat(filepath.Join(out, f)); err != nil {
+				t.Errorf("%s: %v", name, err)
+			}
+		}
+	}
+}
+
 func TestSharesReviewedFileInRepo(t *testing.T) {
 	var cs []sec.SharesClass
 	if err := readReviewed("../../shares-reviewed.json", &cs); err != nil || sec.ValidateSharesClasses(cs) != nil || len(cs) == 0 {
@@ -223,11 +250,9 @@ func TestSecbuildAcceptance(t *testing.T) {
 	defer func(n int, m []string) { minShares, mustHaveShares = n, m }(minShares, mustHaveShares)
 	zpath, tpath, rpath, spath := fixture(t)
 	for name, set := range map[string]func(){
-		"too few":        func() { minFiles, mustHave = 5, []string{"AAPL"} },
-		"missing":        func() { minFiles, mustHave = 1, []string{"MSFT"} },
-		"not fresh":      func() { minFiles, mustHave = 1, []string{"AAPL"}; now = now.AddDate(1, 0, 0) },
-		"too few counts": func() { minFiles, mustHave, minShares, mustHaveShares = 1, []string{"AAPL"}, 4, nil },
-		"count missing":  func() { minFiles, mustHave, minShares, mustHaveShares = 1, []string{"AAPL"}, 0, []string{"NVDA"} },
+		"too few":   func() { minFiles, mustHave = 5, []string{"AAPL"} },
+		"missing":   func() { minFiles, mustHave = 1, []string{"MSFT"} },
+		"not fresh": func() { minFiles, mustHave = 1, []string{"AAPL"}; now = now.AddDate(1, 0, 0) },
 	} {
 		before := now
 		minShares, mustHaveShares = 0, nil

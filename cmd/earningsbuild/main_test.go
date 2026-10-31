@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,6 +43,7 @@ func fixture(t *testing.T, extra map[string][]byte) (string, string, string) {
 	t.Helper()
 	tmp := t.TempDir()
 	jpmPage, _ := json.Marshal(releases("2025-01-15", "2025-04-11", "2025-07-15", "2025-10-14"))
+	oldF6, _ := json.Marshal(table{Form: []string{"F-6EF", "424B4"}, FilingDate: []string{"2019-03-01", "2019-03-02"}, Items: []string{"", ""}})
 	// JPM's newest filing is a Form 4 of yesterday (sets asOf); Apple has a 10-Q.
 	apple := releases("2025-07-31", "2025-10-30", "2026-01-29", "2026-04-30", "2026-07-30")
 	apple.Form = append(apple.Form, "10-Q")
@@ -59,6 +61,10 @@ func fixture(t *testing.T, extra map[string][]byte) (string, string, string) {
 		"CIK0000000013.json":                 sub(13, releases("2025-07-31", "2025-10-30", "2026-01-29", "2026-04-30", "2026-07-30"), map[string]string{"name": "CIK0000000013-submissions-001.json", "filingTo": "2025-06-30"}),
 		"CIK0000000021.json":                 sub(21, releases("2026-08-04")),
 		"CIK0000000099.json":                 sub(99, releases("2025-07-31", "2025-10-30", "2026-01-29", "2026-04-30", "2026-07-30")),
+		// Depositary shares registered on an old page (issue #18); an old page missing.
+		"CIK0000000031.json":                 sub(31, releases("2025-07-31", "2025-10-30", "2026-01-29", "2026-04-30", "2026-07-30"), map[string]string{"name": "CIK0000000031-submissions-001.json", "filingTo": "2019-06-30"}),
+		"CIK0000000031-submissions-001.json": oldF6,
+		"CIK0000000041.json":                 sub(41, releases("2025-07-31", "2025-10-30", "2026-01-29", "2026-04-30", "2026-07-30"), map[string]string{"name": "CIK0000000041-submissions-001.json", "filingTo": "2019-06-30"}),
 	}
 	for k, v := range extra {
 		entries[k] = v
@@ -73,7 +79,7 @@ func fixture(t *testing.T, extra map[string][]byte) (string, string, string) {
 	zw.Close()
 	zf.Close()
 	tpath := filepath.Join(tmp, "tickers.json")
-	os.WriteFile(tpath, []byte(`{"fields":["cik","name","ticker","exchange"],"data":[[320193,"Apple Inc.","AAPL","Nasdaq"],[19617,"JPMorgan","JPM","NYSE"],[11,"Wrong Cik","WRNG","NYSE"],[13,"Lost Page","LOST","NYSE"],[21,"New Listing","NEWCO","Nasdaq"]]}`), 0o644)
+	os.WriteFile(tpath, []byte(`{"fields":["cik","name","ticker","exchange"],"data":[[320193,"Apple Inc.","AAPL","Nasdaq"],[19617,"JPMorgan","JPM","NYSE"],[11,"Wrong Cik","WRNG","NYSE"],[13,"Lost Page","LOST","NYSE"],[21,"New Listing","NEWCO","Nasdaq"],[31,"ADS Co","ADSC","Nasdaq"],[41,"Old Page","OLDP","NYSE"]]}`), 0o644)
 	rpath := filepath.Join(tmp, "reviewed.json")
 	os.WriteFile(rpath, []byte(`[]`), 0o644)
 	return zpath, tpath, rpath
@@ -99,6 +105,13 @@ func TestRun(t *testing.T) {
 		"AAPL": {CIK: 320193, Next: "2026-10-29", Last: "2026-07-30", Basis: "2025-10-30"},
 		// The older releases come from the page.
 		"JPM": {CIK: 19617, Next: "2027-01-12", Last: "2026-10-13", Basis: "2026-01-13"},
+		// Old pages give no dates: a missing one does not cost the estimate.
+		"ADSC": {CIK: 31, Next: "2026-10-29", Last: "2026-07-30", Basis: "2025-10-30"},
+		"OLDP": {CIK: 41, Next: "2026-10-29", Last: "2026-07-30", Basis: "2025-10-30"},
+	}
+	// Every company read in full, and the one with an F-6; not the one whose old page is missing.
+	if got := fmt.Sprint(f.Filers, f.Depositary); got != "[21 31 19617 320193] [31]" {
+		t.Fatalf("filers, depositary = %s", got)
 	}
 	if len(f.Symbols) != len(want) {
 		t.Fatalf("symbols %v (a file naming another CIK and a missing page are skipped)", f.Symbols)
@@ -159,7 +172,7 @@ func TestCompanyReleasesRejectsBadPageLists(t *testing.T) {
 		for _, e := range zr.File {
 			entries[e.Name] = e
 		}
-		_, _, err = companyReleases(entries["CIK0000320193.json"], entries, 320193, earnings.NewYorkDay(now))
+		_, _, _, _, err = companyReleases(entries["CIK0000320193.json"], entries, 320193, earnings.NewYorkDay(now))
 		return err
 	}
 	if err := read(t, map[string]string{"name": pageName, "filingTo": "2025-04-30"}); err != nil {

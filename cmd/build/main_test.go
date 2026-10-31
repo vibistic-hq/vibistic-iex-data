@@ -461,79 +461,98 @@ func sharesSnapshot(t *testing.T, dir, generated string, symbols map[string]sec.
 	os.WriteFile(filepath.Join(dir, "shares.json"), b, 0o644)
 }
 
-func count(n float64, asOf string) sec.Shares {
-	return sec.Shares{N: &n, AsOf: asOf, Filed: "2026-10-09", Accn: "0000320193-26-000020", How: "cover"}
+func count(n float64, cik int64) sec.Shares {
+	return sec.Shares{N: &n, CIK: cik, AsOf: "2026-10-02", Filed: "2026-10-09", Accn: "0000320193-26-000020", How: "cover"}
+}
+
+// earningsWithFilers writes an earnings file whose filings index covers
+// filers, depositary among them.
+func earningsWithFilers(t *testing.T, path string, filers, depositary []int64) {
+	t.Helper()
+	earningsFile(t, path, "2026-10-09T09:30:00Z", earnings.MinSymbols)
+	var f earnings.File
+	b, _ := os.ReadFile(path)
+	json.Unmarshal(b, &f)
+	f.Filers, f.Depositary = filers, depositary
+	b, _ = json.Marshal(f)
+	os.WriteFile(path, b, 0o644)
 }
 
 func TestRunPublishesShareCounts(t *testing.T) {
 	when := time.Date(2026, 10, 10, 7, 0, 0, 0, time.UTC)
-	build := func(t *testing.T, snapshot func(dir string)) string {
+	build := func(t *testing.T, snapshot func(dir string), withEarnings func(path string)) string {
 		tmp := t.TempDir()
 		days := filepath.Join(tmp, "days")
 		os.Mkdir(days, 0o755)
 		aapl := tops.Summary{Symbol: "AAPL", Open: 100_0000, High: 101_0000, Low: 99_0000, Close: 100_5000, Volume: 10_000, Notional: 1_005_000, Trades: 10, LotTrades: 10}
-		writeDay(t, days, "2026-10-08", aapl)
 		writeDay(t, days, "2026-10-09", aapl)
 		reviewed := filepath.Join(tmp, "reviewed.json")
 		os.WriteFile(reviewed, []byte("[]"), 0o644)
 		secDir := filepath.Join(tmp, "sec")
 		snapshot(secDir)
+		earningsPath := ""
+		if withEarnings != nil {
+			earningsPath = filepath.Join(tmp, "earnings.json")
+			withEarnings(earningsPath)
+		}
 		out := filepath.Join(tmp, "site")
-		if err := run(days, reviewed, secDir, "", out, when); err != nil {
+		if err := run(days, reviewed, secDir, earningsPath, out, when); err != nil {
 			t.Fatal(err)
 		}
 		return out
 	}
+	good := func(dir string) {
+		secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z")
+		sharesSnapshot(t, dir, "2026-10-09T09:30:00Z", map[string]sec.Shares{"AAPL": count(14594180000, 320193), "MREO": count(798454864, 1719714), "NEWCO": count(5000000, 21), "META": {Why: "none"}})
+	}
+	filers := func(p string) { earningsWithFilers(t, p, []int64{320193, 1719714}, []int64{1719714}) }
 	t.Run("good", func(t *testing.T) {
-		out := build(t, func(dir string) {
-			secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z")
-			// MSFT has no IEX file: no reference.
-			sharesSnapshot(t, dir, "2026-10-09T09:30:00Z", map[string]sec.Shares{"AAPL": count(14594180000, "2026-10-09"), "MSFT": count(7426194552, "2026-10-09"), "META": {Why: "none"}})
-		})
+		out := build(t, good, filers)
 		var f sec.SharesFile
-		if err := decodeStrict(filepath.Join(out, "v1", "shares.json"), &f, sharesMaxFile); err != nil || sec.ValidateShares(&f, true) != nil {
+		if err := decodeStrict(filepath.Join(out, "v1", "shares.json"), &f, sharesMaxFile); err != nil || sec.ValidateShares(&f) != nil {
 			t.Fatal(err)
 		}
-		if a := f.Symbols["AAPL"]; a.Ref == nil || *a.Ref != (sec.Ref{Date: "2026-10-09", Close: 100.5}) || a.Split != nil || *a.N != 14594180000 {
-			t.Fatalf("AAPL %+v", a)
+		// An ADS issuer and a company whose filings were not all read get no count.
+		if a := f.Symbols["AAPL"]; a.N == nil || *a.N != 14594180000 || f.Symbols["MREO"].Why != "depositary" || f.Symbols["NEWCO"].Why != "check" || f.Symbols["META"].Why != "none" {
+			t.Fatalf("symbols %+v", f.Symbols)
 		}
-		if m := f.Symbols["MSFT"]; m.Ref != nil || *m.N != 7426194552 {
-			t.Fatalf("MSFT %+v", m)
-		}
-		// The SEC files are still published beside it.
 		if _, err := os.Stat(filepath.Join(out, "v1", "sec", "shares.json")); !os.IsNotExist(err) {
 			t.Fatal("shares.json copied as a symbol file")
 		}
+		// The published earnings file leaves the lists out (the app refuses unknown fields).
+		e, _ := os.ReadFile(filepath.Join(out, "v1", "earnings.json"))
+		if strings.Contains(string(e), "filers") || strings.Contains(string(e), "depositary") {
+			t.Fatalf("earnings.json kept the lists: %.200s", e)
+		}
 		m, _ := os.ReadFile(filepath.Join(out, "v1", "manifest.json"))
-		if !strings.Contains(string(m), `"shares":{"checkable":1,"counted":2,"generatedAt":"2026-10-09T09:30:00Z","source":"SEC","symbols":3}`) || !strings.Contains(string(m), `"sec":{"files":1`) {
+		if !strings.Contains(string(m), `"shares":{"counted":1,"generatedAt":"2026-10-09T09:30:00Z","source":"SEC","symbols":4}`) || !strings.Contains(string(m), `"sec":{"files":1`) {
 			t.Fatalf("manifest = %s", m)
 		}
 	})
-	for name, snapshot := range map[string]func(dir string){
-		"missing": func(dir string) { secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z") },
-		"stale": func(dir string) {
+	for name, tc := range map[string]struct {
+		snapshot     func(dir string)
+		withEarnings func(path string)
+	}{
+		"missing":     {func(dir string) { secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z") }, filers},
+		"no earnings": {good, nil},
+		"no filers":   {good, func(p string) { earningsWithFilers(t, p, nil, nil) }},
+		"stale": {func(dir string) {
 			secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z")
-			sharesSnapshot(t, dir, "2026-09-20T09:30:00Z", map[string]sec.Shares{"AAPL": count(1, "2026-09-19")})
-		},
-		"invalid": func(dir string) {
+			sharesSnapshot(t, dir, "2026-09-20T09:30:00Z", map[string]sec.Shares{"AAPL": count(1, 320193)})
+		}, filers},
+		"invalid": {func(dir string) {
 			secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z")
-			c := count(1, "2026-10-09")
+			c := count(1, 320193)
 			c.How = "guess"
 			sharesSnapshot(t, dir, "2026-10-09T09:30:00Z", map[string]sec.Shares{"AAPL": c})
-		},
-		"ref before build": func(dir string) {
+		}, filers},
+		"nothing counted": {func(dir string) {
 			secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z")
-			c := count(1, "2026-10-09")
-			c.Ref = &sec.Ref{Date: "2026-10-09", Close: 1}
-			sharesSnapshot(t, dir, "2026-10-09T09:30:00Z", map[string]sec.Shares{"AAPL": c})
-		},
-		"nothing counted": func(dir string) {
-			secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z")
-			sharesSnapshot(t, dir, "2026-10-09T09:30:00Z", map[string]sec.Shares{"AAPL": {Why: "none"}})
-		},
+			sharesSnapshot(t, dir, "2026-10-09T09:30:00Z", map[string]sec.Shares{"MREO": count(798454864, 1719714)})
+		}, filers},
 	} {
 		t.Run(name, func(t *testing.T) {
-			out := build(t, snapshot)
+			out := build(t, tc.snapshot, tc.withEarnings)
 			if _, err := os.Stat(filepath.Join(out, "v1", "shares.json")); !os.IsNotExist(err) {
 				t.Fatalf("v1/shares.json published: %v", err)
 			}
@@ -542,38 +561,5 @@ func TestRunPublishesShareCounts(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
-	}
-}
-
-func TestAdjustShares(t *testing.T) {
-	file := &series.File{
-		Splits: []series.Split{{Date: "2024-06-10", New: 10, Old: 1}, {Date: "2026-08-03", New: 3, Old: 2}, {Date: "2026-09-01", New: 2, Old: 1}},
-		Bars:   [][7]float64{{20260723, 0, 0, 0, 40, 0, 0}, {20260724, 0, 0, 0, 41, 0, 0}, {20260727, 0, 0, 0, 42, 0, 0}},
-	}
-	// Two splits after the count (3:2 then 2:1 is 3:1); the one before it is already in the count.
-	got := adjustShares(count(1000001, "2026-07-26"), file)
-	if *got.N != 3000003 || *got.Split != (sec.Factor{New: 3, Old: 1}) || *got.Ref != (sec.Ref{Date: "2026-07-24", Close: 41}) {
-		t.Fatalf("got %+v %+v %+v", *got.N, got.Split, got.Ref)
-	}
-	// A reverse split rounds to whole shares.
-	rev := &series.File{Splits: []series.Split{{Date: "2026-08-03", New: 1, Old: 8}}}
-	if got := adjustShares(count(1000003, "2026-07-26"), rev); *got.N != 125000 || got.Ref != nil {
-		t.Fatalf("reverse %+v", got)
-	}
-	// Counted on a split's day, or a jump in the history since the count: unknown basis.
-	if got := adjustShares(count(1, "2026-08-03"), file); got.N != nil || got.Why != "check" {
-		t.Fatalf("split day %+v", got)
-	}
-	jump := &series.File{Breaks: []series.Break{{Date: "2026-08-10", Kind: "jump", Move: -0.6}}}
-	if got := adjustShares(count(1, "2026-07-26"), jump); got.N != nil || got.Why != "check" {
-		t.Fatalf("jump %+v", got)
-	}
-	// A quiet break leaves the count alone; no bar within 10 days before the count, no reference.
-	quiet := &series.File{Breaks: []series.Break{{Date: "2026-08-10", Kind: "quiet", Sessions: 25}}, Bars: [][7]float64{{20260701, 0, 0, 0, 40, 0, 0}}}
-	if got := adjustShares(count(5, "2026-07-26"), quiet); *got.N != 5 || got.Ref != nil {
-		t.Fatalf("quiet %+v", got)
-	}
-	if got := adjustShares(count(5, "2026-07-26"), nil); *got.N != 5 || got.Ref != nil {
-		t.Fatalf("no file %+v", got)
 	}
 }
