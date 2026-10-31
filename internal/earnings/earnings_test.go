@@ -1,6 +1,7 @@
 package earnings
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -308,6 +309,39 @@ func TestValidateNoEstimate(t *testing.T) {
 		f.NoEstimate = ne
 		if Validate(f) == nil {
 			t.Errorf("%s passed", name)
+		}
+	}
+}
+
+// The share counts' lists (issue #18): whole CIKs, each once, depositary ones
+// among the filers.
+func TestPrivateLists(t *testing.T) {
+	f := goodFile()
+	SetPrivate(f, map[string]int64{"AAPL": 320193, "MREO": 1719714}, []int64{1719714})
+	filers, dep, err := PrivateLists(f)
+	if err != nil || filers["MREO"] != 1719714 || len(dep) != 1 {
+		t.Fatal(filers, dep, err)
+	}
+	for name, set := range map[string]func(f *File){
+		"no filers":              func(f *File) { f.Filers, f.Depositary = nil, nil },
+		"bad symbol":             func(f *File) { SetPrivate(f, map[string]int64{"aapl": 1}, nil) },
+		"filer out of range":     func(f *File) { SetPrivate(f, map[string]int64{"AAPL": 0}, nil) },
+		"depositary not a filer": func(f *File) { SetPrivate(f, map[string]int64{"AAPL": 1}, []int64{2}) },
+		"depositary twice":       func(f *File) { SetPrivate(f, map[string]int64{"AAPL": 1}, []int64{1, 1}) },
+		"filers a list":          func(f *File) { f.Filers = json.RawMessage(`[1]`) },
+		"depositary strings": func(f *File) {
+			SetPrivate(f, map[string]int64{"AAPL": 1}, nil)
+			f.Depositary = json.RawMessage(`["x"]`)
+		},
+	} {
+		f := goodFile()
+		set(f)
+		if _, _, err := PrivateLists(f); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+		// The estimates stand on their own (Codex review).
+		if err := Validate(f); err != nil {
+			t.Errorf("%s: the estimates refused: %v", name, err)
 		}
 	}
 }

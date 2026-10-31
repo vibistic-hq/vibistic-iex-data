@@ -452,3 +452,134 @@ func TestRunStillRejectsAnUnmatchedReviewForASymbolWithUnusableBars(t *testing.T
 		t.Fatalf("want the unmatched review rejected, got %v", err)
 	}
 }
+
+// sharesSnapshot writes a secbuild-shaped shares.json into dir.
+func sharesSnapshot(t *testing.T, dir, generated string, symbols map[string]sec.Shares) {
+	t.Helper()
+	os.MkdirAll(dir, 0o755)
+	b, _ := json.Marshal(sec.SharesFile{V: 1, Source: "SEC", GeneratedAt: generated, Symbols: symbols})
+	os.WriteFile(filepath.Join(dir, "shares.json"), b, 0o644)
+}
+
+func count(n float64, cik int64) sec.Shares {
+	return sec.Shares{N: &n, CIK: cik, AsOf: "2026-10-02", Filed: "2026-10-09", Accn: "0000320193-26-000020", How: "cover"}
+}
+
+// earningsWithFilers writes an earnings file whose filings index covers
+// filers, depositary among them.
+func earningsWithFilers(t *testing.T, path string, filers map[string]int64, depositary []int64) {
+	t.Helper()
+	earningsFile(t, path, "2026-10-09T09:30:00Z", earnings.MinSymbols)
+	var f earnings.File
+	b, _ := os.ReadFile(path)
+	json.Unmarshal(b, &f)
+	if filers != nil {
+		earnings.SetPrivate(&f, filers, depositary)
+	}
+	b, _ = json.Marshal(f)
+	os.WriteFile(path, b, 0o644)
+}
+
+func TestRunPublishesShareCounts(t *testing.T) {
+	when := time.Date(2026, 10, 10, 7, 0, 0, 0, time.UTC)
+	build := func(t *testing.T, snapshot func(dir string), withEarnings func(path string)) string {
+		tmp := t.TempDir()
+		days := filepath.Join(tmp, "days")
+		os.Mkdir(days, 0o755)
+		aapl := tops.Summary{Symbol: "AAPL", Open: 100_0000, High: 101_0000, Low: 99_0000, Close: 100_5000, Volume: 10_000, Notional: 1_005_000, Trades: 10, LotTrades: 10}
+		writeDay(t, days, "2026-10-09", aapl)
+		reviewed := filepath.Join(tmp, "reviewed.json")
+		os.WriteFile(reviewed, []byte("[]"), 0o644)
+		secDir := filepath.Join(tmp, "sec")
+		snapshot(secDir)
+		earningsPath := ""
+		if withEarnings != nil {
+			earningsPath = filepath.Join(tmp, "earnings.json")
+			withEarnings(earningsPath)
+		}
+		out := filepath.Join(tmp, "site")
+		if err := run(days, reviewed, secDir, earningsPath, out, when); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	good := func(dir string) {
+		secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z")
+		// REUSE's symbol is another company's in the earnings file's ticker list (a day apart).
+		sharesSnapshot(t, dir, "2026-10-09T09:30:00Z", map[string]sec.Shares{"AAPL": count(14594180000, 320193), "MREO": count(798454864, 1719714), "NEWCO": count(5000000, 21), "REUSE": count(7000000, 55), "META": {Why: "none"}})
+	}
+	filers := func(p string) {
+		earningsWithFilers(t, p, map[string]int64{"AAPL": 320193, "MREO": 1719714, "REUSE": 66, "OTHER": 55}, []int64{1719714})
+	}
+	t.Run("good", func(t *testing.T) {
+		out := build(t, good, filers)
+		var f sec.SharesFile
+		if err := decodeStrict(filepath.Join(out, "v1", "shares.json"), &f, sharesMaxFile); err != nil || sec.ValidateShares(&f) != nil {
+			t.Fatal(err)
+		}
+		// An ADS issuer and a company whose filings were not all read get no count.
+		if a := f.Symbols["AAPL"]; a.N == nil || *a.N != 14594180000 || f.Symbols["MREO"].Why != "depositary" || f.Symbols["NEWCO"].Why != "check" || f.Symbols["REUSE"].Why != "check" || f.Symbols["META"].Why != "none" {
+			t.Fatalf("symbols %+v", f.Symbols)
+		}
+		if _, err := os.Stat(filepath.Join(out, "v1", "sec", "shares.json")); !os.IsNotExist(err) {
+			t.Fatal("shares.json copied as a symbol file")
+		}
+		// The published earnings file leaves the lists out (the app refuses unknown fields).
+		e, _ := os.ReadFile(filepath.Join(out, "v1", "earnings.json"))
+		if strings.Contains(string(e), "filers") || strings.Contains(string(e), "depositary") {
+			t.Fatalf("earnings.json kept the lists: %.200s", e)
+		}
+		m, _ := os.ReadFile(filepath.Join(out, "v1", "manifest.json"))
+		if !strings.Contains(string(m), `"shares":{"counted":1,"generatedAt":"2026-10-09T09:30:00Z","source":"SEC","symbols":5}`) || !strings.Contains(string(m), `"sec":{"files":1`) {
+			t.Fatalf("manifest = %s", m)
+		}
+	})
+	for name, tc := range map[string]struct {
+		snapshot     func(dir string)
+		withEarnings func(path string)
+	}{
+		"missing":     {func(dir string) { secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z") }, filers},
+		"no earnings": {good, nil},
+		"no filers":   {good, func(p string) { earningsWithFilers(t, p, nil, nil) }},
+		"bad lists":   {good, func(p string) { earningsWithFilers(t, p, map[string]int64{"AAPL": 320193}, []int64{9}) }},
+		// Lists of the wrong shape still let the estimates decode (Codex review).
+		"malformed lists": {good, func(p string) {
+			earningsWithFilers(t, p, nil, nil)
+			b, _ := os.ReadFile(p)
+			os.WriteFile(p, []byte(strings.Replace(string(b), `{"v":1`, `{"filers":[1],"depositary":["bad"],"v":1`, 1)), 0o644)
+		}},
+		"stale": {func(dir string) {
+			secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z")
+			// Otherwise valid as of its own date, so only its age refuses it (Codex review).
+			c := count(1, 320193)
+			c.AsOf, c.Filed = "2026-09-10", "2026-09-15"
+			sharesSnapshot(t, dir, "2026-09-20T09:30:00Z", map[string]sec.Shares{"AAPL": c})
+		}, filers},
+		"invalid": {func(dir string) {
+			secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z")
+			c := count(1, 320193)
+			c.How = "guess"
+			sharesSnapshot(t, dir, "2026-10-09T09:30:00Z", map[string]sec.Shares{"AAPL": c})
+		}, filers},
+		"nothing counted": {func(dir string) {
+			secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z")
+			sharesSnapshot(t, dir, "2026-10-09T09:30:00Z", map[string]sec.Shares{"MREO": count(798454864, 1719714)})
+		}, filers},
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := build(t, tc.snapshot, tc.withEarnings)
+			if _, err := os.Stat(filepath.Join(out, "v1", "shares.json")); !os.IsNotExist(err) {
+				t.Fatalf("v1/shares.json published: %v", err)
+			}
+			// The SEC files and the estimates do not depend on it.
+			if _, err := os.Stat(filepath.Join(out, "v1", "sec", "AAPL.json")); err != nil {
+				t.Fatal(err)
+			}
+			if tc.withEarnings != nil {
+				if _, err := os.Stat(filepath.Join(out, "v1", "earnings.json")); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}

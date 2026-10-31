@@ -17,6 +17,8 @@
 package earnings
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"sort"
@@ -59,6 +61,15 @@ type File struct {
 	// Covered symbols without an estimate, by reason (one of Whys; issue #14).
 	// Optional: files from before it have none.
 	NoEstimate map[string][]string `json:"noEstimate,omitempty"`
+	// For the share counts (issue #18), never published: each symbol of a
+	// company whose whole filing index was read, with its CIK (Filers), and
+	// the companies among them that ever registered depositary shares on Form
+	// F-6 (Depositary), whose US listing is an ADS, not the shares their 10-Q
+	// counts. Build strips both. Kept raw, so that however malformed they are
+	// the estimates still decode: PrivateLists reads and checks them, for the
+	// share counts alone.
+	Filers     json.RawMessage `json:"filers,omitempty"`
+	Depositary json.RawMessage `json:"depositary,omitempty"`
 }
 
 // Entry is one symbol's estimate.
@@ -280,6 +291,54 @@ func Validate(f *File) error {
 		return fmt.Errorf("%d symbols", n)
 	}
 	return nil
+}
+
+// SetPrivate stores the share counts' lists in the file.
+func SetPrivate(f *File, filers map[string]int64, depositary []int64) error {
+	var err error
+	if f.Filers, err = json.Marshal(filers); err != nil {
+		return err
+	}
+	f.Depositary, err = json.Marshal(depositary)
+	return err
+}
+
+// PrivateLists reads and checks the share counts' lists: a bad one costs the
+// share counts only, never the estimates.
+func PrivateLists(f *File) (map[string]int64, []int64, error) {
+	var filers map[string]int64
+	var depositary []int64
+	for _, x := range []struct {
+		raw json.RawMessage
+		v   any
+	}{{f.Filers, &filers}, {f.Depositary, &depositary}} {
+		if len(x.raw) == 0 {
+			continue
+		}
+		dec := json.NewDecoder(bytes.NewReader(x.raw))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(x.v); err != nil {
+			return nil, nil, fmt.Errorf("lists: %w", err)
+		}
+	}
+	if len(filers) == 0 || len(filers) > MaxSymbols {
+		return nil, nil, fmt.Errorf("%d filers", len(filers))
+	}
+	ciks := map[int64]bool{}
+	for s, c := range filers {
+		if !symbolRe.MatchString(s) || c < 1 || c > 9999999999 {
+			return nil, nil, fmt.Errorf("filers: %q cik %d", s, c)
+		}
+		ciks[c] = true
+	}
+	seen := map[int64]bool{}
+	for _, c := range depositary {
+		if !ciks[c] || seen[c] {
+			return nil, nil, fmt.Errorf("depositary: cik %d", c)
+		}
+		seen[c] = true
+	}
+	return filers, depositary, nil
 }
 
 func knownWhy(w string) bool {

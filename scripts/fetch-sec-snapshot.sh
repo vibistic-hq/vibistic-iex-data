@@ -35,7 +35,7 @@ awk -v max_n="$max_entries" -v max_b="$max_unpacked" \
   -v sym='^[.]/[A-Z][A-Z]?[A-Z]?[A-Z]?[A-Z]?[.]json$' -v cls='^[.]/[A-Z][A-Z]?[A-Z]?[A-Z]?[A-Z]?[.][A-Z][.]json$' '
   { n++ }
   substr($1, 1, 1) == "d" && $NF == "./" && NF == 6 { next }
-  substr($1, 1, 1) == "-" && NF == 6 && ($NF == "./snapshot.json" || $NF ~ sym || $NF ~ cls) { b += $3; next }
+  substr($1, 1, 1) == "-" && NF == 6 && ($NF == "./snapshot.json" || $NF == "./shares.json" || $NF ~ sym || $NF ~ cls) { b += $3; next }
   { bad++ }
   END { exit (bad > 0 || n > max_n || b > max_b) ? 1 : 0 }
 ' "$tmp/list" || skip "$newest holds unexpected entries or is too big"

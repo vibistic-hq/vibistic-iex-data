@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,6 +43,7 @@ func fixture(t *testing.T, extra map[string][]byte) (string, string, string) {
 	t.Helper()
 	tmp := t.TempDir()
 	jpmPage, _ := json.Marshal(releases("2025-01-15", "2025-04-11", "2025-07-15", "2025-10-14"))
+	oldF6, _ := json.Marshal(table{Form: []string{"F-6EF", "424B4"}, FilingDate: []string{"2019-03-01", "2019-03-02"}, Items: []string{"", ""}})
 	// JPM's newest filing is a Form 4 of yesterday (sets asOf); Apple has a 10-Q.
 	apple := releases("2025-07-31", "2025-10-30", "2026-01-29", "2026-04-30", "2026-07-30")
 	apple.Form = append(apple.Form, "10-Q")
@@ -59,6 +61,10 @@ func fixture(t *testing.T, extra map[string][]byte) (string, string, string) {
 		"CIK0000000013.json":                 sub(13, releases("2025-07-31", "2025-10-30", "2026-01-29", "2026-04-30", "2026-07-30"), map[string]string{"name": "CIK0000000013-submissions-001.json", "filingTo": "2025-06-30"}),
 		"CIK0000000021.json":                 sub(21, releases("2026-08-04")),
 		"CIK0000000099.json":                 sub(99, releases("2025-07-31", "2025-10-30", "2026-01-29", "2026-04-30", "2026-07-30")),
+		// Depositary shares registered on an old page (issue #18); an old page missing.
+		"CIK0000000031.json":                 sub(31, releases("2025-07-31", "2025-10-30", "2026-01-29", "2026-04-30", "2026-07-30"), map[string]string{"name": "CIK0000000031-submissions-001.json", "filingTo": "2019-06-30"}),
+		"CIK0000000031-submissions-001.json": oldF6,
+		"CIK0000000041.json":                 sub(41, releases("2025-07-31", "2025-10-30", "2026-01-29", "2026-04-30", "2026-07-30"), map[string]string{"name": "CIK0000000041-submissions-001.json", "filingTo": "2019-06-30"}),
 	}
 	for k, v := range extra {
 		entries[k] = v
@@ -73,7 +79,7 @@ func fixture(t *testing.T, extra map[string][]byte) (string, string, string) {
 	zw.Close()
 	zf.Close()
 	tpath := filepath.Join(tmp, "tickers.json")
-	os.WriteFile(tpath, []byte(`{"fields":["cik","name","ticker","exchange"],"data":[[320193,"Apple Inc.","AAPL","Nasdaq"],[19617,"JPMorgan","JPM","NYSE"],[11,"Wrong Cik","WRNG","NYSE"],[13,"Lost Page","LOST","NYSE"],[21,"New Listing","NEWCO","Nasdaq"]]}`), 0o644)
+	os.WriteFile(tpath, []byte(`{"fields":["cik","name","ticker","exchange"],"data":[[320193,"Apple Inc.","AAPL","Nasdaq"],[19617,"JPMorgan","JPM","NYSE"],[11,"Wrong Cik","WRNG","NYSE"],[13,"Lost Page","LOST","NYSE"],[21,"New Listing","NEWCO","Nasdaq"],[31,"ADS Co","ADSC","Nasdaq"],[41,"Old Page","OLDP","NYSE"]]}`), 0o644)
 	rpath := filepath.Join(tmp, "reviewed.json")
 	os.WriteFile(rpath, []byte(`[]`), 0o644)
 	return zpath, tpath, rpath
@@ -99,6 +105,14 @@ func TestRun(t *testing.T) {
 		"AAPL": {CIK: 320193, Next: "2026-10-29", Last: "2026-07-30", Basis: "2025-10-30"},
 		// The older releases come from the page.
 		"JPM": {CIK: 19617, Next: "2027-01-12", Last: "2026-10-13", Basis: "2026-01-13"},
+		// Old pages give no dates: a missing one does not cost the estimate.
+		"ADSC": {CIK: 31, Next: "2026-10-29", Last: "2026-07-30", Basis: "2025-10-30"},
+		"OLDP": {CIK: 41, Next: "2026-10-29", Last: "2026-07-30", Basis: "2025-10-30"},
+	}
+	// Every company read in full, and the one with an F-6; not the one whose old page is missing.
+	filers, depositary, err := earnings.PrivateLists(&f)
+	if got := fmt.Sprint(filers, depositary, err); got != "map[AAPL:320193 ADSC:31 JPM:19617 NEWCO:21] [31] <nil>" {
+		t.Fatalf("filers, depositary = %s", got)
 	}
 	if len(f.Symbols) != len(want) {
 		t.Fatalf("symbols %v (a file naming another CIK and a missing page are skipped)", f.Symbols)
@@ -159,7 +173,7 @@ func TestCompanyReleasesRejectsBadPageLists(t *testing.T) {
 		for _, e := range zr.File {
 			entries[e.Name] = e
 		}
-		_, _, err = companyReleases(entries["CIK0000320193.json"], entries, 320193, earnings.NewYorkDay(now))
+		_, _, _, _, err = companyReleases(entries["CIK0000320193.json"], entries, 320193, earnings.NewYorkDay(now))
 		return err
 	}
 	if err := read(t, map[string]string{"name": pageName, "filingTo": "2025-04-30"}); err != nil {
@@ -200,4 +214,79 @@ func TestRunSkipsUnalignedColumns(t *testing.T) {
 	if strings.Contains(string(b), "AAPL") {
 		t.Fatal("a company with unaligned columns got an estimate")
 	}
+}
+
+// Old pages (issue #18) are read for their forms only, on their own budget:
+// a malformed or unread one leaves the company incomplete, never short of its
+// estimate's pages (Codex review).
+func TestCompanyReleasesOldPages(t *testing.T) {
+	recent := releases("2025-07-31", "2025-10-30", "2026-01-29", "2026-04-30", "2026-07-30")
+	inWindow, _ := json.Marshal(releases("2025-04-30"))
+	oldName, newName := "CIK0000320193-submissions-002.json", "CIK0000320193-submissions-001.json"
+	read := func(t *testing.T, old []byte) (dates int, depositary, complete bool, err error) {
+		t.Helper()
+		// The old page is listed first, so it is read before the one the estimate needs.
+		pages := []map[string]string{{"name": oldName, "filingTo": "2019-06-30"}, {"name": newName, "filingTo": "2025-04-30"}}
+		files := map[string][]byte{"CIK0000320193.json": sub(320193, recent, pages...), newName: inWindow}
+		if old != nil {
+			files[oldName] = old
+		}
+		z, _, _ := fixture(t, files)
+		zr, err := zip.OpenReader(z)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer zr.Close()
+		entries := map[string]*zip.File{}
+		for _, e := range zr.File {
+			entries[e.Name] = e
+		}
+		raw, _, dep, comp, err := companyReleases(entries["CIK0000320193.json"], entries, 320193, earnings.NewYorkDay(now))
+		return len(raw), dep, comp, err
+	}
+	f6, _ := json.Marshal(table{Form: []string{"F-6"}, FilingDate: []string{"2019-03-01"}, Items: []string{""}})
+	if n, dep, comp, err := read(t, f6); err != nil || n != 6 || !dep || !comp {
+		t.Fatalf("an F-6 on an old page: %d %v %v %v", n, dep, comp, err)
+	}
+	for name, old := range map[string][]byte{
+		"missing":         nil,
+		"null":            []byte("null"),
+		"no form column":  []byte(`{"filingDate":["2019-03-01"]}`),
+		"unaligned":       []byte(`{"form":["10-K","F-6"],"filingDate":["2019-03-01"]}`),
+		"not json":        []byte(`{`),
+		"trailing object": append(append([]byte{}, f6...), []byte(`{}`)...),
+		"a null form":     []byte(`{"form":[null],"filingDate":["2019-03-01"]}`),
+		"empty object":    []byte(`{}`),
+	} {
+		n, _, comp, err := read(t, old)
+		if err != nil || n != 6 || comp {
+			t.Errorf("%s: %d dates, complete %v, %v", name, n, comp, err)
+		}
+	}
+	t.Run("old pages have their own budget", func(t *testing.T) {
+		big, _ := json.Marshal(table{Form: make([]string, 2000), FilingDate: make([]string, 2000), Items: make([]string, 2000)})
+		// Enough for the estimate's page only: the bigger old page, read first, must not use it.
+		maxCompany = uint64(len(inWindow))
+		defer func() { maxCompany = 512 << 20 }()
+		n, _, comp, err := read(t, big)
+		if err != nil || n != 6 || comp {
+			t.Fatalf("%d dates, complete %v, %v", n, comp, err)
+		}
+	})
+	t.Run("a page in the estimate's window, malformed, leaves the company incomplete", func(t *testing.T) {
+		for name, page := range map[string][]byte{"null": []byte("null"), "empty": []byte("{}")} {
+			z, _, _ := fixture(t, map[string][]byte{"CIK0000320193.json": sub(320193, recent, map[string]string{"name": newName, "filingTo": "2025-04-30"}), newName: page})
+			zr, _ := zip.OpenReader(z)
+			entries := map[string]*zip.File{}
+			for _, e := range zr.File {
+				entries[e.Name] = e
+			}
+			raw, _, _, comp, err := companyReleases(entries["CIK0000320193.json"], entries, 320193, earnings.NewYorkDay(now))
+			zr.Close()
+			// The estimate reads it as before (an empty page): only the share count is lost.
+			if err != nil || len(raw) != 5 || comp {
+				t.Errorf("%s: %d dates, complete %v, %v", name, len(raw), comp, err)
+			}
+		}
+	})
 }

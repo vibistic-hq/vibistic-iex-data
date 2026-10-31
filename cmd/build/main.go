@@ -113,13 +113,27 @@ func run(daysDir, reviewedPath, secDir, earningsPath, out string, now time.Time)
 		}
 	}
 	// Nor on the earnings estimates, which are left out alone.
+	var filings *earnings.File
 	if earningsPath != "" {
-		info, err := copyEarnings(earningsPath, filepath.Join(out, "v1", "earnings.json"), now)
+		info, f, err := copyEarnings(earningsPath, filepath.Join(out, "v1", "earnings.json"), now)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "build: earnings estimates left out: %v\n", err)
 			os.Remove(filepath.Join(out, "v1", "earnings.json"))
 		} else {
 			manifest["earnings"] = info
+			filings = f
+		}
+	}
+	// The share counts (issue #18) are left out alone too, and without the
+	// earnings file's list of companies whose filings were read for depositary
+	// shares (its Filers), since an ADS issuer's count is not its listing's.
+	if secDir != "" {
+		info, err := copyShares(filepath.Join(secDir, "shares.json"), filepath.Join(out, "v1", "shares.json"), filings, now)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "build: share counts left out: %v\n", err)
+			os.Remove(filepath.Join(out, "v1", "shares.json"))
+		} else {
+			manifest["shares"] = info
 		}
 	}
 	if err := writeJSON(filepath.Join(out, "v1", "manifest.json"), manifest); err != nil {
@@ -227,7 +241,7 @@ func copySEC(dir, dst string, now time.Time) (map[string]any, error) {
 	n := 0
 	for _, p := range paths {
 		name := filepath.Base(p)
-		if name == "snapshot.json" {
+		if name == "snapshot.json" || name == "shares.json" {
 			continue
 		}
 		var f sec.File
@@ -251,6 +265,70 @@ func copySEC(dir, dst string, now time.Time) (map[string]any, error) {
 	return map[string]any{"source": "SEC", "generatedAt": snap.GeneratedAt, "files": n}, nil
 }
 
+// The shares file is a few hundred KB.
+const sharesMaxFile = 4 << 20
+
+// copyShares checks the snapshot's share counts again and publishes them,
+// leaving out (null, "depositary") every company that ever registered
+// depositary shares (Form F-6): its 10-Q counts the underlying shares, while
+// its US listing is an ADS that may stand for several of them. A count is
+// null too ("check") unless the earnings file has the same symbol under the
+// same company, its filings all read.
+func copyShares(path, dst string, filings *earnings.File, now time.Time) (map[string]any, error) {
+	if filings == nil {
+		return nil, fmt.Errorf("no earnings file to tell depositary shares by")
+	}
+	filers, depositaryCIKs, err := earnings.PrivateLists(filings)
+	if err != nil {
+		return nil, fmt.Errorf("earnings file's filing lists: %w", err)
+	}
+	var f sec.SharesFile
+	if err := decodeStrict(path, &f, sharesMaxFile); err != nil {
+		return nil, err
+	}
+	if err := sec.ValidateShares(&f); err != nil {
+		return nil, err
+	}
+	gen, _ := time.Parse(time.RFC3339, f.GeneratedAt)
+	if age := now.Sub(gen); age > secMaxAge || age < -time.Hour {
+		return nil, fmt.Errorf("share counts from %s are too old or in the future", f.GeneratedAt)
+	}
+	depositary := map[int64]bool{}
+	for _, c := range depositaryCIKs {
+		depositary[c] = true
+	}
+	counted, ads, unread := 0, 0, 0
+	for sym, s := range f.Symbols {
+		if s.N == nil {
+			continue
+		}
+		switch {
+		case depositary[s.CIK]:
+			f.Symbols[sym] = sec.Shares{Why: "depositary"}
+			ads++
+		// Read in full, and under the same symbol: the two files come from
+		// separate downloads of SEC's ticker list, a day apart at most, and a
+		// symbol that moved to another company in between gets no count.
+		case filers[sym] != s.CIK:
+			f.Symbols[sym] = sec.Shares{Why: "check"}
+			unread++
+		default:
+			counted++
+		}
+	}
+	if err := sec.ValidateShares(&f); err != nil {
+		return nil, err
+	}
+	if counted == 0 {
+		return nil, fmt.Errorf("no share counts")
+	}
+	if err := writeJSON(dst, &f); err != nil {
+		return nil, err
+	}
+	fmt.Fprintf(os.Stderr, "build: %d share counts (%d depositary-share issuers and %d unread companies left out)\n", counted, ads, unread)
+	return map[string]any{"source": "SEC", "generatedAt": f.GeneratedAt, "symbols": len(f.Symbols), "counted": counted}, nil
+}
+
 // A symbol's SEC file is a few KB; anything near this is not one.
 const secMaxFile = 256 << 10
 
@@ -260,25 +338,31 @@ const earningsMaxFile = 2 << 20
 // copyEarnings checks the earnings file again (strict decoding,
 // earnings.Validate, at least earnings.MinSymbols, no older than an SEC
 // snapshot may be) and writes it to dst.
-func copyEarnings(path, dst string, now time.Time) (map[string]any, error) {
+// It returns the file as read, with the lists for the share counts (which
+// the published file leaves out).
+func copyEarnings(path, dst string, now time.Time) (map[string]any, *earnings.File, error) {
 	var f earnings.File
 	if err := decodeStrict(path, &f, earningsMaxFile); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := earnings.Validate(&f); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	gen, _ := time.Parse(time.RFC3339, f.GeneratedAt)
 	if age := now.Sub(gen); age > secMaxAge || age < -time.Hour {
-		return nil, fmt.Errorf("estimates from %s are too old or in the future", f.GeneratedAt)
+		return nil, nil, fmt.Errorf("estimates from %s are too old or in the future", f.GeneratedAt)
 	}
 	if len(f.Symbols) < earnings.MinSymbols {
-		return nil, fmt.Errorf("only %d symbols", len(f.Symbols))
+		return nil, nil, fmt.Errorf("only %d symbols", len(f.Symbols))
 	}
-	if err := writeJSON(dst, &f); err != nil {
-		return nil, err
+	// The estimates never wait on the share counts' lists: published without
+	// them, whatever they hold (PrivateLists is copyShares' concern).
+	pub := f
+	pub.Filers, pub.Depositary = nil, nil
+	if err := writeJSON(dst, &pub); err != nil {
+		return nil, nil, err
 	}
-	return map[string]any{"source": "SEC", "generatedAt": f.GeneratedAt, "asOf": f.AsOf, "symbols": len(f.Symbols)}, nil
+	return map[string]any{"source": "SEC", "generatedAt": f.GeneratedAt, "asOf": f.AsOf, "symbols": len(f.Symbols)}, &f, nil
 }
 
 // decodeStrict reads one small JSON document of at most max bytes: known
@@ -383,7 +467,7 @@ func indexPage(asOf string, symbols, covered int) string {
 <p>Daily bars built from IEX trades, for <a href="https://stocks.vibistic.com/">Vibistic Stocks</a>. Data as of the close of ` + e(asOf) + `: ` + fmt.Sprint(symbols) + ` symbols, ` + fmt.Sprint(covered) + ` with enough IEX trading to show numbers.</p>
 <p>` + e(series.Citation) + ` <a href="` + e(series.TermsURL) + `">IEX Historical Data Terms of Use</a>.</p>
 <p>The data reflects trading on IEX only, not other markets, and is a reference point only, not a basis for trading decisions. Not investment advice.</p>
-<p>Files: <code>v1/manifest.json</code>, <code>v1/s/{SYMBOL}.json</code> and, for symbols with enough IEX trading, <code>v1/og/{SYMBOL}.png</code> (the preview image of a Vibistic Stocks share link), and <code>v1/sec/{SYMBOL}.json</code> (revenue and net income from the company's SEC filings, as first reported), and <code>v1/earnings.json</code> (each company's next earnings release date, estimated from its past SEC filings: a year after the matching one, so it can be off). How they are made: <a href="https://github.com/vibistic-hq/vibistic-iex-data">github.com/vibistic-hq/vibistic-iex-data</a>.</p>
+<p>Files: <code>v1/manifest.json</code>, <code>v1/s/{SYMBOL}.json</code> and, for symbols with enough IEX trading, <code>v1/og/{SYMBOL}.png</code> (the preview image of a Vibistic Stocks share link), and <code>v1/sec/{SYMBOL}.json</code> (revenue and net income from the company's SEC filings, as first reported), <code>v1/shares.json</code> (each company's shares outstanding as last reported on the cover of its SEC filings), and <code>v1/earnings.json</code> (each company's next earnings release date, estimated from its past SEC filings: a year after the matching one, so it can be off). How they are made: <a href="https://github.com/vibistic-hq/vibistic-iex-data">github.com/vibistic-hq/vibistic-iex-data</a>.</p>
 </body></html>
 `
 }
