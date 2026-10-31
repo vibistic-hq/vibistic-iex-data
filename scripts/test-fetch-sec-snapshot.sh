@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests scripts/fetch-sec-snapshot.sh with a stand-in gh: the newest snapshot
-# is unpacked; one with anything but symbol files and snapshot.json is not.
+# is unpacked; one with anything but symbol files, snapshot.json and shares.json is not.
 set -euo pipefail
 fetch="$(cd "$(dirname "$0")" && pwd)/fetch-sec-snapshot.sh"
 tmp=$(mktemp -d)
@@ -33,11 +33,11 @@ bash "$fetch" "$tmp/out0" >/dev/null
 [ ! -e "$tmp/out0" ] || fail "unpacked with no snapshot"
 
 snap sec-20261016.tar.gz snapshot.json AAPL.json
-snap sec-20261017.tar.gz snapshot.json AAPL.json BRK.B.json
+snap sec-20261017.tar.gz snapshot.json shares.json AAPL.json BRK.B.json
 bash "$fetch" "$tmp/out1" >/dev/null
-[ "$(ls "$tmp/out1" | tr '\n' ' ')" = "AAPL.json BRK.B.json snapshot.json " ] || fail "newest not unpacked: $(ls "$tmp/out1")"
+[ "$(ls "$tmp/out1" | tr '\n' ' ')" = "AAPL.json BRK.B.json shares.json snapshot.json " ] || fail "newest not unpacked: $(ls "$tmp/out1")"
 
-for bad in "../evil.json" "sub/AAPL.json" "aapl.json" "AAPL.js" "index.html" "x_test.go" "AAPL.json AAPL.json"; do
+for bad in "../evil.json" "sub/AAPL.json" "aapl.json" "AAPL.js" "index.html" "x_test.go" "AAPL.json AAPL.json" "sub/shares.json" "shares.json.gz"; do
   rm -f "$ASSETS"/*
   snap sec-20261018.tar.gz snapshot.json "$bad"
   bash "$fetch" "$tmp/out2" >/dev/null 2>&1 || true

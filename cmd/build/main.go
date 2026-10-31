@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -110,6 +111,14 @@ func run(daysDir, reviewedPath, secDir, earningsPath, out string, now time.Time)
 			os.RemoveAll(filepath.Join(out, "v1", "sec"))
 		} else {
 			manifest["sec"] = info
+		}
+		// The share counts (issue #18) are left out alone, like the earnings file.
+		info, err = copyShares(filepath.Join(secDir, "shares.json"), filepath.Join(out, "v1", "shares.json"), files, now)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "build: share counts left out: %v\n", err)
+			os.Remove(filepath.Join(out, "v1", "shares.json"))
+		} else {
+			manifest["shares"] = info
 		}
 	}
 	// Nor on the earnings estimates, which are left out alone.
@@ -227,7 +236,7 @@ func copySEC(dir, dst string, now time.Time) (map[string]any, error) {
 	n := 0
 	for _, p := range paths {
 		name := filepath.Base(p)
-		if name == "snapshot.json" {
+		if name == "snapshot.json" || name == "shares.json" {
 			continue
 		}
 		var f sec.File
@@ -249,6 +258,108 @@ func copySEC(dir, dst string, now time.Time) (map[string]any, error) {
 		return nil, fmt.Errorf("%d files, snapshot.json says %d", n, snap.Files)
 	}
 	return map[string]any{"source": "SEC", "generatedAt": snap.GeneratedAt, "files": n}, nil
+}
+
+// The shares file is a few hundred KB.
+const sharesMaxFile = 4 << 20
+
+// copyShares checks the snapshot's share counts again and publishes them
+// with the IEX file's view of each symbol: the count multiplied by every split
+// after the count's date, and the split-adjusted IEX close on or just before
+// that date (Ref), which the app compares with its own price history there.
+// A count whose basis cannot be told (a split on the count's date, or a jump
+// in the IEX history since then that no split explains) is null.
+func copyShares(path, dst string, iex map[string]*series.File, now time.Time) (map[string]any, error) {
+	var f sec.SharesFile
+	if err := decodeStrict(path, &f, sharesMaxFile); err != nil {
+		return nil, err
+	}
+	if err := sec.ValidateShares(&f, false); err != nil {
+		return nil, err
+	}
+	gen, _ := time.Parse(time.RFC3339, f.GeneratedAt)
+	if age := now.Sub(gen); age > secMaxAge || age < -time.Hour {
+		return nil, fmt.Errorf("share counts from %s are too old or in the future", f.GeneratedAt)
+	}
+	counted, refs := 0, 0
+	for sym, s := range f.Symbols {
+		if s.N == nil {
+			continue
+		}
+		s = adjustShares(s, iex[sym])
+		f.Symbols[sym] = s
+		if s.N != nil {
+			counted++
+		}
+		if s.Ref != nil {
+			refs++
+		}
+	}
+	if err := sec.ValidateShares(&f, true); err != nil {
+		return nil, err
+	}
+	if counted == 0 {
+		return nil, fmt.Errorf("no share counts")
+	}
+	if err := writeJSON(dst, &f); err != nil {
+		return nil, err
+	}
+	return map[string]any{"source": "SEC", "generatedAt": f.GeneratedAt, "symbols": len(f.Symbols), "counted": counted, "checkable": refs}, nil
+}
+
+// refMaxGap: the IEX close used as Ref is from the count's date or at most
+// this many days before it (a count dated on a weekend or holiday).
+const refMaxGap = 10
+
+func adjustShares(s sec.Shares, file *series.File) sec.Shares {
+	if file == nil {
+		return s
+	}
+	newN, oldN := 1, 1
+	for _, sp := range file.Splits {
+		switch {
+		case sp.Date == s.AsOf:
+			// Counted on the split's own day: before or after it cannot be told.
+			return sec.Shares{Why: "check"}
+		case sp.Date > s.AsOf:
+			newN, oldN = newN*sp.New, oldN*sp.Old
+			if g := gcd(newN, oldN); g > 1 {
+				newN, oldN = newN/g, oldN/g
+			}
+			if newN > 1e6 || oldN > 1e6 {
+				return sec.Shares{Why: "check"}
+			}
+		}
+	}
+	for _, b := range file.Breaks {
+		if b.Date > s.AsOf && b.Kind != "quiet" {
+			return sec.Shares{Why: "check"}
+		}
+	}
+	if newN != oldN {
+		n := math.Round(*s.N * float64(newN) / float64(oldN))
+		s.N = &n
+		s.Split = &sec.Factor{New: newN, Old: oldN}
+	}
+	asOf, _ := time.Parse("2006-01-02", s.AsOf)
+	for i := len(file.Bars) - 1; i >= 0; i-- {
+		d := time.Date(int(file.Bars[i][0])/10000, time.Month(int(file.Bars[i][0])/100%100), int(file.Bars[i][0])%100, 0, 0, 0, 0, time.UTC)
+		if d.After(asOf) {
+			continue
+		}
+		if asOf.Sub(d) <= refMaxGap*24*time.Hour {
+			s.Ref = &sec.Ref{Date: d.Format("2006-01-02"), Close: file.Bars[i][4]}
+		}
+		break
+	}
+	return s
+}
+
+func gcd(a, b int) int {
+	for b != 0 {
+		a, b = b, a%b
+	}
+	return a
 }
 
 // A symbol's SEC file is a few KB; anything near this is not one.
@@ -383,7 +494,7 @@ func indexPage(asOf string, symbols, covered int) string {
 <p>Daily bars built from IEX trades, for <a href="https://stocks.vibistic.com/">Vibistic Stocks</a>. Data as of the close of ` + e(asOf) + `: ` + fmt.Sprint(symbols) + ` symbols, ` + fmt.Sprint(covered) + ` with enough IEX trading to show numbers.</p>
 <p>` + e(series.Citation) + ` <a href="` + e(series.TermsURL) + `">IEX Historical Data Terms of Use</a>.</p>
 <p>The data reflects trading on IEX only, not other markets, and is a reference point only, not a basis for trading decisions. Not investment advice.</p>
-<p>Files: <code>v1/manifest.json</code>, <code>v1/s/{SYMBOL}.json</code> and, for symbols with enough IEX trading, <code>v1/og/{SYMBOL}.png</code> (the preview image of a Vibistic Stocks share link), and <code>v1/sec/{SYMBOL}.json</code> (revenue and net income from the company's SEC filings, as first reported), and <code>v1/earnings.json</code> (each company's next earnings release date, estimated from its past SEC filings: a year after the matching one, so it can be off). How they are made: <a href="https://github.com/vibistic-hq/vibistic-iex-data">github.com/vibistic-hq/vibistic-iex-data</a>.</p>
+<p>Files: <code>v1/manifest.json</code>, <code>v1/s/{SYMBOL}.json</code> and, for symbols with enough IEX trading, <code>v1/og/{SYMBOL}.png</code> (the preview image of a Vibistic Stocks share link), and <code>v1/sec/{SYMBOL}.json</code> (revenue and net income from the company's SEC filings, as first reported), <code>v1/shares.json</code> (each company's shares outstanding as last reported in its SEC filings, adjusted for later splits), and <code>v1/earnings.json</code> (each company's next earnings release date, estimated from its past SEC filings: a year after the matching one, so it can be off). How they are made: <a href="https://github.com/vibistic-hq/vibistic-iex-data">github.com/vibistic-hq/vibistic-iex-data</a>.</p>
 </body></html>
 `
 }
