@@ -112,7 +112,7 @@ func ExtractEspp(b []byte, cik int64, now time.Time, search *SearchFile) (*Espp,
 		}
 	}
 	if best == nil {
-		if h, how, ok := search.Best(cik); ok {
+		if h, how, ok := search.Best(cik, now); ok {
 			best = &Espp{CIK: cik, Filed: h.Filed, Accn: h.Accn, How: how}
 		}
 	}

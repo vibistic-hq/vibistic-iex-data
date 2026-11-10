@@ -68,17 +68,17 @@ func TestSearchFileAddKeepsMainDocumentsInWindowNewestFirst(t *testing.T) {
 	}
 	// Best: the 10-K first, else the S-8, else none (and a nil file has none).
 	f.S8["1"] = SearchHit{Filed: "2026-01-01", Accn: "0000000001-26-000009"}
-	if h, how, ok := f.Best(1); !ok || how != HowTenK || h.Accn != "0000000001-26-000002" {
+	if h, how, ok := f.Best(1, now); !ok || how != HowTenK || h.Accn != "0000000001-26-000002" {
 		t.Fatalf("best 1: %+v %s", h, how)
 	}
-	if _, how, ok := f.Best(6); !ok || how != HowS8 {
+	if _, how, ok := f.Best(6, now); !ok || how != HowS8 {
 		t.Fatalf("best 6: %s", how)
 	}
-	if _, _, ok := f.Best(99); ok {
+	if _, _, ok := f.Best(99, now); ok {
 		t.Fatal("best 99")
 	}
 	var none *SearchFile
-	if _, _, ok := none.Best(1); ok {
+	if _, _, ok := none.Best(1, now); ok {
 		t.Fatal("nil file")
 	}
 }
@@ -159,5 +159,64 @@ func TestValidateEsppChecksEachKindsAge(t *testing.T) {
 		if err := ValidateEspp(file(c.e)); (err == nil) != c.ok {
 			t.Errorf("%+v: %v", c.e, err)
 		}
+	}
+}
+
+// Codex review of PR #23.
+func TestParseSearchPageRefusesPartialAndTrailingAnswers(t *testing.T) {
+	ok := searchAnswer(1, "eq", searchHit(`"0000320193"`, "10-K", "10-K", "2026-11-03", "0000320193-26-000026"))
+	for name, body := range map[string]string{
+		"timed out":     strings.Replace(ok, `{"hits":`, `{"timed_out":true,"hits":`, 1),
+		"shard failed":  strings.Replace(ok, `{"hits":`, `{"_shards":{"total":5,"successful":4,"failed":1},"hits":`, 1),
+		"trailing data": ok + " x",
+		"two documents": ok + ok,
+	} {
+		if _, err := ParseSearchPage(strings.NewReader(body)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	whole := strings.Replace(ok, `{"hits":`, `{"timed_out":false,"_shards":{"total":5,"successful":5,"failed":0},"hits":`, 1)
+	if p, err := ParseSearchPage(strings.NewReader(whole)); err != nil || len(p.Hits) != 1 {
+		t.Fatalf("complete answer: %+v, %v", p, err)
+	}
+}
+
+// Codex review of PR #23: a blank check company's 10-K describes the plan the
+// merged company "will adopt" (DRDB, 0001104659-26-023575).
+func TestSearchFileAddSkipsBlankCheckCompanies(t *testing.T) {
+	now := time.Date(2026, 11, 10, 9, 0, 0, 0, time.UTC)
+	f := &SearchFile{V: 1, GeneratedAt: now.Format(time.RFC3339), TenK: map[string]SearchHit{}, S8: map[string]SearchHit{}}
+	f.Add(PageHit{CIKs: []int64{1}, SICs: []string{"6770"}, Form: "10-K", FileType: "10-K", Filed: "2026-03-01", Accn: "0001104659-26-023575"}, now)
+	f.Add(PageHit{CIKs: []int64{2}, SICs: []string{"3674"}, Form: "10-K", FileType: "10-K", Filed: "2026-03-01", Accn: "0000000002-26-000001"}, now)
+	if _, ok := f.TenK["1"]; ok || len(f.TenK) != 1 {
+		t.Fatalf("tenK %+v", f.TenK)
+	}
+	page, err := ParseSearchPage(strings.NewReader(searchAnswer(1, "eq", `{"_source":{"ciks":["0000000001"],"sics":["6770"],"form":"10-K","file_type":"10-K","file_date":"2026-03-01","adsh":"0001104659-26-023575"}}`)))
+	if err != nil || len(page.Hits) != 1 || page.Hits[0].SICs[0] != "6770" {
+		t.Fatalf("%+v %v", page, err)
+	}
+}
+
+// Codex review of PR #23: the build may run after the search; evidence that has
+// aged out by then is passed over for the next kind, never published.
+func TestBestRechecksAgesAtBuildTime(t *testing.T) {
+	f := &SearchFile{V: 1, GeneratedAt: "2026-11-09T08:00:00Z",
+		TenK: map[string]SearchHit{"1": {Filed: "2025-10-06", Accn: "0000000001-25-000001"}},
+		S8:   map[string]SearchHit{"1": {Filed: "2025-01-01", Accn: "0000000001-25-000002"}}}
+	searched := time.Date(2025, 11, 9, 9, 0, 0, 0, time.UTC).AddDate(1, 0, 0)
+	if _, how, ok := f.Best(1, searched); !ok || how != HowTenK {
+		t.Fatalf("at search time: %s", how)
+	}
+	built := searched.AddDate(0, 0, 1)
+	if _, how, ok := f.Best(1, built); !ok || how != HowS8 {
+		t.Fatalf("a day later: %s", how)
+	}
+	got, err := ExtractEspp(esppFacts(1, nil, nil), 1, built, f)
+	if err != nil || got == nil || got.How != HowS8 {
+		t.Fatalf("extract: %+v %v", got, err)
+	}
+	file := &EsppFile{V: 1, Source: "SEC", GeneratedAt: built.Format(time.RFC3339), Symbols: map[string]Espp{"A": *got}}
+	if err := ValidateEspp(file); err != nil {
+		t.Fatal(err)
 	}
 }

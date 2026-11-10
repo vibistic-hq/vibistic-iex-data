@@ -57,20 +57,34 @@ func main() {
 // #22); empty, missing or bad, the list keeps the shares-issued evidence only.
 var esppSearchPath string
 
+// maxSearchFile caps the search file, read through it so an oversized file
+// never costs more than the cap (Codex review of PR #23).
+var maxSearchFile int64 = 64 << 20
+
 // readSearch reads and checks the search file, or nil with a warning.
 func readSearch(path string, now time.Time) *sec.SearchFile {
 	if path == "" {
 		return nil
 	}
-	b, err := os.ReadFile(path)
-	if err == nil && len(b) > 64<<20 {
-		err = fmt.Errorf("%d bytes", len(b))
+	var b []byte
+	file, err := os.Open(path)
+	if err == nil {
+		b, err = io.ReadAll(io.LimitReader(file, maxSearchFile+1))
+		file.Close()
+	}
+	if err == nil && int64(len(b)) > maxSearchFile {
+		err = fmt.Errorf("over %d bytes", maxSearchFile)
 	}
 	var f sec.SearchFile
 	if err == nil {
 		dec := json.NewDecoder(bytes.NewReader(b))
 		dec.DisallowUnknownFields()
 		err = dec.Decode(&f)
+		if err == nil {
+			if _, end := dec.Token(); end != io.EOF {
+				err = fmt.Errorf("data after the document")
+			}
+		}
 	}
 	if err == nil {
 		err = sec.ValidateSearch(&f, now)

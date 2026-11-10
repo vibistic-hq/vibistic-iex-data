@@ -376,6 +376,9 @@ func TestSecbuildMergesSearchEvidence(t *testing.T) {
 		"unknown field": strings.Replace(good, `"v":1`, `"v":1,"x":1`, 1),
 		"stale":         strings.Replace(good, "2026-10-18T08:00:00Z", "2026-10-10T08:00:00Z", 1),
 		"bad hit":       strings.Replace(good, "0001045810-26-000021", "x", 1),
+		// Codex review of PR #23: the whole file or nothing.
+		"trailing data": good + " x",
+		"two documents": good + good,
 	} {
 		esppSearchPath = searchFile(body)
 		out := filepath.Join(t.TempDir(), "sec")
@@ -386,6 +389,18 @@ func TestSecbuildMergesSearchEvidence(t *testing.T) {
 			t.Errorf("%s: %+v", name, ef.Symbols)
 		}
 	}
+	// Over the size cap: the same, read no further than the cap (Codex review of PR #23).
+	defer func(n int64) { maxSearchFile = n }(maxSearchFile)
+	maxSearchFile = int64(len(good)) - 1
+	esppSearchPath = searchFile(good)
+	out = filepath.Join(t.TempDir(), "sec")
+	if err := run(zpath, tpath, rpath, spath, out, now); err != nil {
+		t.Fatal(err)
+	}
+	if ef := read(out); len(ef.Symbols) != 1 {
+		t.Errorf("oversized: %+v", ef.Symbols)
+	}
+	maxSearchFile = 64 << 20
 	// No file at all: the same.
 	esppSearchPath = filepath.Join(t.TempDir(), "missing.json")
 	out = filepath.Join(t.TempDir(), "sec")

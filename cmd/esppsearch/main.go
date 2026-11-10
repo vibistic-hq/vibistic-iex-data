@@ -28,8 +28,9 @@ const (
 	searchURL   = "https://efts.sec.gov/LATEST/search-index"
 	phrase      = `"employee stock purchase plan"`
 	maxRequests = 600
-	// The search pages no further than this; a month with more would be cut.
-	maxFrom = 9900
+	// The search answers hits up to this many (offset 9,900 plus a page of 100);
+	// a month with more would be cut (Codex review of PR #23).
+	maxTotal = 10000
 )
 
 // Acceptance: a run that finds far fewer than on 2026-11-10 (1,658 and 997
@@ -147,7 +148,7 @@ func run(c *client, out string, now time.Time) error {
 				if err != nil {
 					return err
 				}
-				if page.Total > maxFrom {
+				if page.Total > maxTotal {
 					return fmt.Errorf("%s %s..%s: %d hits, more than one window can page", w.form, m[0], m[1], page.Total)
 				}
 				// Every hit counts toward paging, read or not.

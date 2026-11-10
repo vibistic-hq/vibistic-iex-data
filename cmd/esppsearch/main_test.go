@@ -25,6 +25,7 @@ type fakeSearch struct {
 	hits  map[string][]map[string]any // by form
 	fail  int32
 	total string // "eq" unless set
+	count int    // a total to report instead of the real one, when set
 	seen  int32
 	ua    atomic.Value
 }
@@ -57,7 +58,11 @@ func (s *fakeSearch) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if rel == "" {
 		rel = "eq"
 	}
-	json.NewEncoder(w).Encode(map[string]any{"hits": map[string]any{"total": map[string]any{"value": len(in), "relation": rel}, "hits": in[from:end]}})
+	count := len(in)
+	if s.count > 0 {
+		count = s.count
+	}
+	json.NewEncoder(w).Encode(map[string]any{"hits": map[string]any{"total": map[string]any{"value": count, "relation": rel}, "hits": in[from:end]}})
 }
 
 func hit(cik int64, form, date string, n int) map[string]any {
@@ -164,5 +169,31 @@ func TestMonths(t *testing.T) {
 	want := [][2]string{{"2025-10-06", "2025-10-31"}, {"2025-11-01", "2025-11-30"}, {"2025-12-01", "2025-12-10"}}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("%v", got)
+	}
+}
+
+// Codex review of PR #23: up to 10,000 hits a month can be paged (offsets up to
+// 9,900); more cannot.
+func TestRunPagesUpToTenThousandHitsAMonth(t *testing.T) {
+	lower(t)
+	s := fixture()
+	for i := len(s.hits["10-K"]); i < 10000; i++ {
+		s.hits["10-K"] = append(s.hits["10-K"], hit(int64(100000+i), "10-K", "2026-02-15", i))
+	}
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+	out := filepath.Join(t.TempDir(), "espp-search.json")
+	if err := run(testClient(srv.URL), out, now); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(out)
+	var f sec.SearchFile
+	json.Unmarshal(b, &f)
+	if len(f.TenK) != 10000 {
+		t.Fatalf("%d 10-K companies", len(f.TenK))
+	}
+	s.count = 10001
+	if err := run(testClient(srv.URL), filepath.Join(t.TempDir(), "x.json"), now); err == nil {
+		t.Fatal("10,001 hits accepted")
 	}
 }

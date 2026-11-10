@@ -53,7 +53,9 @@ type SearchPage struct {
 }
 
 type PageHit struct {
-	CIKs     []int64
+	CIKs []int64
+	// Standard industry codes of the filer(s); 6770 is a blank check (SPAC).
+	SICs     []string
 	Form     string // the filing's form
 	FileType string // this document's type: the main document has the form's
 	Filed    string
@@ -76,6 +78,10 @@ func ParseSearchPage(r io.Reader) (*SearchPage, error) {
 		return nil, fmt.Errorf("answer over %d bytes", MaxSearchPage)
 	}
 	var raw struct {
+		TimedOut *bool `json:"timed_out"`
+		Shards   *struct {
+			Failed int `json:"failed"`
+		} `json:"_shards"`
 		Hits struct {
 			Total struct {
 				Value    int    `json:"value"`
@@ -84,6 +90,7 @@ func ParseSearchPage(r io.Reader) (*SearchPage, error) {
 			Hits []struct {
 				Source struct {
 					CIKs     []string `json:"ciks"`
+					SICs     []string `json:"sics"`
 					Form     string   `json:"form"`
 					FileType string   `json:"file_type"`
 					FileDate string   `json:"file_date"`
@@ -95,6 +102,18 @@ func ParseSearchPage(r io.Reader) (*SearchPage, error) {
 	dec := json.NewDecoder(bytes.NewReader(b))
 	if err := dec.Decode(&raw); err != nil {
 		return nil, err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, fmt.Errorf("data after the answer")
+	}
+	// A search that timed out or lost a shard can answer 200 with part of the
+	// hits and an exact-looking total (Codex review of PR #23): an error, so
+	// the request is tried again.
+	if raw.TimedOut != nil && *raw.TimedOut {
+		return nil, fmt.Errorf("search timed out")
+	}
+	if raw.Shards != nil && raw.Shards.Failed != 0 {
+		return nil, fmt.Errorf("%d shards failed", raw.Shards.Failed)
 	}
 	if raw.Hits.Total.Value < 0 || raw.Hits.Total.Relation != "eq" {
 		// "gte" means the count was cut off: paging would miss companies.
@@ -122,7 +141,7 @@ func ParseSearchPage(r io.Reader) (*SearchPage, error) {
 		if ciks == nil {
 			continue
 		}
-		page.Hits = append(page.Hits, PageHit{CIKs: ciks, Form: s.Form, FileType: s.FileType, Filed: s.FileDate, Accn: s.Adsh})
+		page.Hits = append(page.Hits, PageHit{CIKs: ciks, SICs: s.SICs, Form: s.Form, FileType: s.FileType, Filed: s.FileDate, Accn: s.Adsh})
 	}
 	return page, nil
 }
@@ -140,6 +159,13 @@ func (f *SearchFile) Add(h PageHit, now time.Time) {
 		into, how = f.S8, HowS8
 	default:
 		return
+	}
+	// A blank check company (SPAC) writes of the plan the merged company "will
+	// adopt", not one of its own (Codex review of PR #23: DRDB).
+	for _, s := range h.SICs {
+		if s == "6770" {
+			return
+		}
 	}
 	filed, err := parseDate(h.Filed)
 	if err != nil || filed.After(now) || now.Sub(filed) > time.Duration(esppHowAge[how])*24*time.Hour {
@@ -180,16 +206,22 @@ func ValidateSearch(f *SearchFile, now time.Time) error {
 	return nil
 }
 
-// Best is a company's strongest search evidence: its 10-K, else its S-8.
-func (f *SearchFile) Best(cik int64) (SearchHit, string, bool) {
+// Best is a company's strongest search evidence still within its kind's age at
+// `now` (the build may run after the search: Codex review of PR #23): its
+// 10-K, else its S-8.
+func (f *SearchFile) Best(cik int64, now time.Time) (SearchHit, string, bool) {
 	if f == nil {
 		return SearchHit{}, "", false
 	}
 	k := strconv.FormatInt(cik, 10)
-	if h, ok := f.TenK[k]; ok {
+	fresh := func(h SearchHit, how string) bool {
+		filed, err := parseDate(h.Filed)
+		return err == nil && !filed.After(now) && now.Sub(filed) <= time.Duration(esppHowAge[how])*24*time.Hour
+	}
+	if h, ok := f.TenK[k]; ok && fresh(h, HowTenK) {
 		return h, HowTenK, true
 	}
-	if h, ok := f.S8[k]; ok {
+	if h, ok := f.S8[k]; ok && fresh(h, HowS8) {
 		return h, HowS8, true
 	}
 	return SearchHit{}, "", false
