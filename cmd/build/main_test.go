@@ -614,14 +614,11 @@ func TestRunPublishesEsppList(t *testing.T) {
 		}
 		return out
 	}
-	d := 0.15
 	plan := func(cik int64) sec.Espp { return sec.Espp{CIK: cik, Filed: "2026-07-29", Accn: "0001193125-26-323660"} }
 	good := func(dir string) {
 		secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z")
-		withDiscount := plan(789019)
-		withDiscount.Discount = &d
 		// REUSE's symbol is another company's in the earnings file's ticker list; NEWCO is not read.
-		esppSnapshot(t, dir, "2026-10-09T09:30:00Z", map[string]sec.Espp{"MSFT": withDiscount, "INTC": plan(50863), "REUSE": plan(55), "NEWCO": plan(21)})
+		esppSnapshot(t, dir, "2026-10-09T09:30:00Z", map[string]sec.Espp{"MSFT": plan(789019), "INTC": plan(50863), "REUSE": plan(55), "NEWCO": plan(21)})
 	}
 	filers := func(p string) {
 		earningsWithFilers(t, p, map[string]int64{"AAPL": 320193, "MSFT": 789019, "INTC": 50863, "REUSE": 66}, nil)
@@ -632,7 +629,7 @@ func TestRunPublishesEsppList(t *testing.T) {
 		if err := decodeStrict(filepath.Join(out, "v1", "espp.json"), &f, esppMaxFile); err != nil || sec.ValidateEspp(&f) != nil {
 			t.Fatal(err)
 		}
-		if len(f.Symbols) != 2 || f.Symbols["MSFT"].Discount == nil || *f.Symbols["MSFT"].Discount != 0.15 || f.Symbols["INTC"].CIK != 50863 {
+		if len(f.Symbols) != 2 || f.Symbols["MSFT"].CIK != 789019 || f.Symbols["INTC"].CIK != 50863 {
 			t.Fatalf("symbols %+v", f.Symbols)
 		}
 		// Never copied as a symbol's SEC file, and the SEC files still publish.

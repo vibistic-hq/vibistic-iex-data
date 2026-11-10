@@ -13,17 +13,20 @@ import (
 // v1/espp.json.
 //
 // A symbol is listed only when its company's 10-K, 10-Q or 10-KT filed in the
-// last two years reports shares or value issued under an employee stock
-// purchase plan (us-gaap StockIssuedDuringPeriod...EmployeeStockPurchasePlan(s)
-// or the ESPP paid-in-capital adjustment), above zero, for a period that ended
-// in that time. That is evidence of a plan that issued shares lately. A symbol
-// not listed is unknown, never "no plan": many companies with a plan (Apple)
-// tag none of these (checked 2026-11-10: 822 of 6,054 listed companies).
+// last two years reports shares (unit "shares") or their value (unit "USD")
+// issued under an employee stock purchase plan, above zero, for a well-formed
+// period that ended in that time (us-gaap
+// StockIssuedDuringPeriodSharesEmployeeStockPurchasePlans or
+// StockIssuedDuringPeriodValueEmployeeStockPurchasePlan): shares actually
+// issued under a plan lately. Expense recognized for a plan is not issuance
+// (Codex review of PR #21). A symbol not listed is unknown, never "no plan":
+// many companies with a plan (Apple) tag neither (checked 2026-11-10).
 //
-// The discount is given only when the filings of the same two years state the
-// plan's purchase price as exactly 85%, 90% or 95% of market, and only one of
-// those (the tag also carries discounts, other plans' figures and slips such
-// as 1.1: anything else, or two values, leaves it out).
+// No discount is published: the purchase-price tag is not specific to employee
+// stock purchase plans, and the bulk facts cannot tie it to one (Codex review
+// of PR #21). A company with no public market for its common stock (two newest
+// annual reports with a public float of zero, as for the share counts) is not
+// listed: its symbol is something else.
 
 // EsppFile is espp.json in a secbuild snapshot and v1/espp.json.
 type EsppFile struct {
@@ -33,25 +36,19 @@ type EsppFile struct {
 	Symbols     map[string]Espp `json:"symbols"`
 }
 
-// Espp is one listed symbol: the newest filing that shows ESPP shares issued,
-// and the discount when stated.
+// Espp is one listed symbol: the newest filing that shows ESPP shares issued.
 type Espp struct {
-	CIK      int64    `json:"cik"`
-	Filed    string   `json:"filed"` // yyyy-mm-dd
-	Accn     string   `json:"accn"`
-	Discount *float64 `json:"discount,omitempty"` // 0.05, 0.1 or 0.15
+	CIK   int64  `json:"cik"`
+	Filed string `json:"filed"` // yyyy-mm-dd
+	Accn  string `json:"accn"`
 }
 
-// EsppIssued are the concepts whose positive value means shares were issued
-// under an ESPP in the period.
-var EsppIssued = []string{
-	"StockIssuedDuringPeriodSharesEmployeeStockPurchasePlans",
-	"StockIssuedDuringPeriodValueEmployeeStockPurchasePlan",
-	"AdjustmentsToAdditionalPaidInCapitalShareBasedCompensationEmployeeStockPurchaseProgramRequisiteServicePeriodRecognition",
+// EsppIssued are the concepts, each in its unit, whose positive value for a
+// period means shares were issued under an ESPP in it.
+var EsppIssued = map[string]string{
+	"StockIssuedDuringPeriodSharesEmployeeStockPurchasePlans": "shares",
+	"StockIssuedDuringPeriodValueEmployeeStockPurchasePlan":   "USD",
 }
-
-// EsppPurchasePercent is the plan's purchase price as a share of market.
-const EsppPurchasePercent = "SharebasedCompensationArrangementBySharebasedPaymentAwardPurchasePriceOfCommonStockPercent"
 
 const (
 	esppMaxAge = 730 // days from the filing to the snapshot
@@ -59,15 +56,13 @@ const (
 	MaxEsppSymbols = 12000
 )
 
-// The purchase prices accepted, and the discount each means.
-var esppDiscounts = map[float64]float64{0.85: 0.15, 0.9: 0.1, 0.95: 0.05}
-
 // ExtractEspp reads one company's companyfacts JSON. It returns nil when the
 // filings show no recent ESPP issuance.
 func ExtractEspp(b []byte, cik int64, now time.Time) (*Espp, error) {
 	var cf struct {
 		CIK   json.RawMessage `json:"cik"`
 		Facts struct {
+			DEI    map[string]json.RawMessage `json:"dei"`
 			USGAAP map[string]json.RawMessage `json:"us-gaap"`
 		} `json:"facts"`
 	}
@@ -81,74 +76,36 @@ func ExtractEspp(b []byte, cik int64, now time.Time) (*Espp, error) {
 	if got, err := parseCIK(cf.CIK); err != nil || got != cik {
 		return nil, fmt.Errorf("cik %.64q in a file for %d", cf.CIK, cik)
 	}
-	all := func(concept string) ([]shareFact, error) {
-		raw, ok := cf.Facts.USGAAP[concept]
-		if !ok {
-			return nil, nil
-		}
-		var c struct {
-			Units map[string][]shareFact `json:"units"`
-		}
-		if err := json.Unmarshal(raw, &c); err != nil {
-			return nil, fmt.Errorf("%s: %w", concept, err)
-		}
-		var out []shareFact
-		for _, u := range c.Units {
-			out = append(out, u...)
-		}
-		return out, nil
+	// No public market for the common stock: the listed symbol is something else.
+	float, err := readUnit(cf.Facts.DEI, "EntityPublicFloat", "USD")
+	if err != nil {
+		return nil, err
+	}
+	if noFloat(float) {
+		return nil, nil
 	}
 	oldest := now.Add(-esppMaxAge * 24 * time.Hour)
-	// A fact from a periodic report filed in the window, for a period that
-	// ended in it, ending on or before its filing.
-	recent := func(f shareFact) (time.Time, bool) {
-		if !forms[f.Form] || !accnRe.MatchString(f.Accn) {
-			return time.Time{}, false
-		}
-		filed, err0 := parseDate(f.Filed)
-		end, err1 := parseDate(f.End)
-		if err0 != nil || err1 != nil || filed.After(now) || filed.Before(oldest) || end.Before(oldest) || end.After(filed) {
-			return time.Time{}, false
-		}
-		return filed, true
-	}
 	var best *Espp
-	for _, concept := range EsppIssued {
-		facts, err := all(concept)
+	for concept, unit := range EsppIssued {
+		facts, err := readUnit(cf.Facts.USGAAP, concept, unit)
 		if err != nil {
 			return nil, err
 		}
 		for _, f := range facts {
-			if _, ok := recent(f); !ok || !finite(f.Val) || f.Val <= 0 {
+			if !forms[f.Form] || !accnRe.MatchString(f.Accn) || !finite(f.Val) || f.Val <= 0 {
+				continue
+			}
+			// A duration: a real start on or before its end, the end in the window and
+			// on or before the filing, the filing in the window.
+			start, err0 := parseDate(f.Start)
+			end, err1 := parseDate(f.End)
+			filed, err2 := parseDate(f.Filed)
+			if err0 != nil || err1 != nil || err2 != nil || start.After(end) || end.After(filed) || filed.After(now) || filed.Before(oldest) || end.Before(oldest) {
 				continue
 			}
 			if best == nil || f.Filed > best.Filed || (f.Filed == best.Filed && f.Accn > best.Accn) {
 				best = &Espp{CIK: cik, Filed: f.Filed, Accn: f.Accn}
 			}
-		}
-	}
-	if best == nil {
-		return nil, nil
-	}
-	pct, err := all(EsppPurchasePercent)
-	if err != nil {
-		return nil, err
-	}
-	seen := map[float64]bool{}
-	clean := true
-	for _, f := range pct {
-		if _, ok := recent(f); !ok {
-			continue
-		}
-		if _, ok := esppDiscounts[f.Val]; !ok {
-			clean = false
-		}
-		seen[f.Val] = true
-	}
-	if clean && len(seen) == 1 {
-		for v := range seen {
-			d := esppDiscounts[v]
-			best.Discount = &d
 		}
 	}
 	return best, nil
@@ -179,9 +136,6 @@ func ValidateEspp(f *EsppFile) error {
 		}
 		if filed, _ := parseDate(e.Filed); gen.Sub(filed) > esppMaxAge*24*time.Hour {
 			return fmt.Errorf("%s: filed %s", sym, e.Filed)
-		}
-		if e.Discount != nil && *e.Discount != 0.05 && *e.Discount != 0.1 && *e.Discount != 0.15 {
-			return fmt.Errorf("%s: discount %v", sym, *e.Discount)
 		}
 	}
 	return nil

@@ -321,7 +321,7 @@ func acceptShares(shares map[string]sec.Shares) error {
 	return nil
 }
 
-// Acceptance for the ESPP list (issue #20): about 880 symbols on 2026-11-10,
+// Acceptance for the ESPP list (issue #20): 797 symbols on 2026-11-10,
 // so far fewer means something upstream changed; and a large filer known to
 // tag its plan among them.
 var (
