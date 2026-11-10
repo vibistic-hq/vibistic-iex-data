@@ -42,11 +42,11 @@ func TestExtractEsppListsRecentIssuance(t *testing.T) {
 		// A newer quarter's value: its filing is the one named.
 		esppValueConcept: {"USD", "[" + esppPeriod("2026-07-01", "2026-09-30", 120000000, accnQ, "10-Q", "2026-10-28") + "]"},
 	}, nil)
-	got, err := ExtractEspp(b, msftCIK, esppNow)
+	got, err := ExtractEspp(b, msftCIK, esppNow, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got == nil || *got != (Espp{CIK: msftCIK, Filed: "2026-10-28", Accn: accnQ}) {
+	if got == nil || *got != (Espp{CIK: msftCIK, Filed: "2026-10-28", Accn: accnQ, How: HowIssued}) {
 		t.Fatalf("got %+v", got)
 	}
 }
@@ -67,13 +67,13 @@ func TestExtractEsppNeedsRecentPositiveIssuanceInAPeriodicReport(t *testing.T) {
 		"reversed dates": esppPeriod("2026-07-01", "2026-06-30", 5, accnK, "10-K", "2026-07-29"),
 	}
 	for name, fact := range cases {
-		got, err := ExtractEspp(esppFacts(msftCIK, map[string][2]string{esppSharesConcept: {"shares", "[" + fact + "]"}}, nil), msftCIK, esppNow)
+		got, err := ExtractEspp(esppFacts(msftCIK, map[string][2]string{esppSharesConcept: {"shares", "[" + fact + "]"}}, nil), msftCIK, esppNow, nil)
 		if err != nil || got != nil {
 			t.Errorf("%s: got %+v, %v", name, got, err)
 		}
 	}
 	// No concept at all: unknown, not an error.
-	if got, err := ExtractEspp(esppFacts(msftCIK, nil, nil), msftCIK, esppNow); err != nil || got != nil {
+	if got, err := ExtractEspp(esppFacts(msftCIK, nil, nil), msftCIK, esppNow, nil); err != nil || got != nil {
 		t.Fatalf("none: %+v, %v", got, err)
 	}
 }
@@ -87,7 +87,7 @@ func TestExtractEsppRefusesWrongUnitsAndExpenseAlone(t *testing.T) {
 		// Expense recognized for a plan is not shares issued.
 		"expense only": {esppAPICConcept: {"USD", recent}},
 	} {
-		if got, err := ExtractEspp(esppFacts(msftCIK, gaap, nil), msftCIK, esppNow); err != nil || got != nil {
+		if got, err := ExtractEspp(esppFacts(msftCIK, gaap, nil), msftCIK, esppNow, nil); err != nil || got != nil {
 			t.Errorf("%s: got %+v, %v", name, got, err)
 		}
 	}
@@ -100,21 +100,21 @@ func TestExtractEsppSkipsCompaniesWithNoPublicFloat(t *testing.T) {
 		return fmt.Sprintf(`{"end":"2025-12-31","val":0,"accn":%q,"form":"10-K","filed":%q}`, accn, filed)
 	}
 	none := map[string][2]string{"EntityPublicFloat": {"USD", "[" + zero("0000000001-25-000001", "2025-03-01") + "," + zero("0000000001-26-000001", "2026-03-01") + "]"}}
-	if got, err := ExtractEspp(esppFacts(msftCIK, issued, none), msftCIK, esppNow); err != nil || got != nil {
+	if got, err := ExtractEspp(esppFacts(msftCIK, issued, none), msftCIK, esppNow, nil); err != nil || got != nil {
 		t.Fatalf("no float: %+v, %v", got, err)
 	}
 	// One such report alone (a new listing's first 10-K) is kept.
 	one := map[string][2]string{"EntityPublicFloat": {"USD", "[" + zero("0000000001-26-000001", "2026-03-01") + "]"}}
-	if got, err := ExtractEspp(esppFacts(msftCIK, issued, one), msftCIK, esppNow); err != nil || got == nil {
+	if got, err := ExtractEspp(esppFacts(msftCIK, issued, one), msftCIK, esppNow, nil); err != nil || got == nil {
 		t.Fatalf("one report: %+v, %v", got, err)
 	}
 }
 
 func TestExtractEsppRefusesAnotherCompanysFile(t *testing.T) {
-	if _, err := ExtractEspp(esppFacts(1, nil, nil), msftCIK, esppNow); err == nil {
+	if _, err := ExtractEspp(esppFacts(1, nil, nil), msftCIK, esppNow, nil); err == nil {
 		t.Fatal("want an error")
 	}
-	if _, err := ExtractEspp([]byte(`{"cik":789019,"facts":{}} {}`), msftCIK, esppNow); err == nil {
+	if _, err := ExtractEspp([]byte(`{"cik":789019,"facts":{}} {}`), msftCIK, esppNow, nil); err == nil {
 		t.Fatal("want an error for trailing data")
 	}
 }
@@ -122,8 +122,8 @@ func TestExtractEsppRefusesAnotherCompanysFile(t *testing.T) {
 func TestValidateEspp(t *testing.T) {
 	good := func() *EsppFile {
 		return &EsppFile{V: 1, Source: "SEC", GeneratedAt: "2026-11-10T09:00:00Z", Symbols: map[string]Espp{
-			"MSFT":  {CIK: msftCIK, Filed: "2026-07-29", Accn: accnK},
-			"BRK.B": {CIK: 1067983, Filed: "2026-08-01", Accn: accnQ},
+			"MSFT":  {CIK: msftCIK, Filed: "2026-07-29", Accn: accnK, How: HowIssued},
+			"BRK.B": {CIK: 1067983, Filed: "2026-08-01", Accn: accnQ, How: HowTenK},
 		}}
 	}
 	if err := ValidateEspp(good()); err != nil {

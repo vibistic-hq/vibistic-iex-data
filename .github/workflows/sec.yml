@@ -47,8 +47,17 @@ jobs:
           curl -fsS --retry 3 --retry-delay 60 --max-time 120 --max-filesize 20000000 -A "$UA" \
             -o dl/tickers.json https://www.sec.gov/files/company_tickers_exchange.json
           ls -l dl
+      # ESPP evidence from EDGAR full-text search (issue #22): about 115 requests,
+      # four a second at most. A failure here only leaves it out: the build then
+      # lists shares-issued evidence alone.
+      - name: Search for ESPP evidence
+        env:
+          UA: Vibistic Stocks parag@vibistic.com
+        timeout-minutes: 15
+        continue-on-error: true
+        run: go run ./cmd/esppsearch -ua "$UA" -out dl/espp-search.json || echo "::warning::ESPP search evidence left out"
       - name: Build
-        run: go run ./cmd/secbuild -facts dl/companyfacts.zip -tickers dl/tickers.json -out sec
+        run: go run ./cmd/secbuild -facts dl/companyfacts.zip -tickers dl/tickers.json -espp-search dl/espp-search.json -out sec
       - name: Keep the snapshot
         env:
           GH_TOKEN: ${{ github.token }}
