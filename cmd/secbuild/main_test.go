@@ -322,3 +322,77 @@ func TestSecbuildAcceptance(t *testing.T) {
 		now = before
 	}
 }
+
+// Issue #22: the full-text search evidence fills in companies without issuance
+// facts; issuance stays first; a bad or missing search file leaves it out.
+func TestSecbuildMergesSearchEvidence(t *testing.T) {
+	defer func(n int, m []string) { minFiles, mustHave = n, m }(minFiles, mustHave)
+	defer func(n int, m []string) { minShares, mustHaveShares = n, m }(minShares, mustHaveShares)
+	defer func(n int, m []string) { minEspp, mustHaveEspp = n, m }(minEspp, mustHaveEspp)
+	defer func(p string) { esppSearchPath = p }(esppSearchPath)
+	minFiles, mustHave = 1, []string{"AAPL"}
+	minShares, mustHaveShares = 0, nil
+	minEspp, mustHaveEspp = 1, []string{"AAPL"}
+	zpath, tpath, rpath, spath := fixture(t)
+	searchFile := func(body string) string {
+		p := filepath.Join(t.TempDir(), "espp-search.json")
+		os.WriteFile(p, []byte(body), 0o644)
+		return p
+	}
+	good := `{"v":1,"generatedAt":"2026-10-18T08:00:00Z",
+		"tenK":{"1045810":{"filed":"2026-02-25","accn":"0001045810-26-000021"},"320193":{"filed":"2025-10-31","accn":"0000320193-25-000079"}},
+		"s8":{"1652044":{"filed":"2024-06-01","accn":"0001652044-24-000060"}}}`
+	read := func(out string) sec.EsppFile {
+		var ef sec.EsppFile
+		b, err := os.ReadFile(filepath.Join(out, "espp.json"))
+		if err != nil || json.Unmarshal(b, &ef) != nil || sec.ValidateEspp(&ef) != nil {
+			t.Fatalf("espp.json: %v %s", err, b)
+		}
+		return ef
+	}
+
+	esppSearchPath = searchFile(good)
+	out := filepath.Join(t.TempDir(), "sec")
+	if err := run(zpath, tpath, rpath, spath, out, now); err != nil {
+		t.Fatal(err)
+	}
+	ef := read(out)
+	if a := ef.Symbols["AAPL"]; a.How != sec.HowIssued || a.Filed != "2026-07-31" {
+		t.Fatalf("AAPL %+v", a)
+	}
+	if n := ef.Symbols["NVDA"]; n.How != sec.HowTenK || n.Filed != "2026-02-25" || n.CIK != 1045810 {
+		t.Fatalf("NVDA %+v", n)
+	}
+	// Both Alphabet classes from its S-8; never the preferred listing.
+	if g, gg := ef.Symbols["GOOGL"], ef.Symbols["GOOG"]; g.How != sec.HowS8 || gg.How != sec.HowS8 {
+		t.Fatalf("GOOGL %+v GOOG %+v", g, gg)
+	}
+	if _, ok := ef.Symbols["AAPL.P"]; ok || len(ef.Symbols) != 4 {
+		t.Fatalf("symbols %+v", ef.Symbols)
+	}
+
+	for name, body := range map[string]string{
+		"malformed":     `{"v":1`,
+		"unknown field": strings.Replace(good, `"v":1`, `"v":1,"x":1`, 1),
+		"stale":         strings.Replace(good, "2026-10-18T08:00:00Z", "2026-10-10T08:00:00Z", 1),
+		"bad hit":       strings.Replace(good, "0001045810-26-000021", "x", 1),
+	} {
+		esppSearchPath = searchFile(body)
+		out := filepath.Join(t.TempDir(), "sec")
+		if err := run(zpath, tpath, rpath, spath, out, now); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if ef := read(out); len(ef.Symbols) != 1 || ef.Symbols["AAPL"].How != sec.HowIssued {
+			t.Errorf("%s: %+v", name, ef.Symbols)
+		}
+	}
+	// No file at all: the same.
+	esppSearchPath = filepath.Join(t.TempDir(), "missing.json")
+	out = filepath.Join(t.TempDir(), "sec")
+	if err := run(zpath, tpath, rpath, spath, out, now); err != nil {
+		t.Fatal(err)
+	}
+	if ef := read(out); len(ef.Symbols) != 1 {
+		t.Errorf("missing: %+v", ef.Symbols)
+	}
+}

@@ -44,6 +44,7 @@ func main() {
 	tickersPath := flag.String("tickers", "company_tickers_exchange.json", "SEC company_tickers_exchange.json")
 	reviewedPath := flag.String("reviewed", "sec-reviewed.json", "reviewed extra share classes")
 	sharesReviewedPath := flag.String("shares-reviewed", "shares-reviewed.json", "reviewed multi-class companies counted by their balance-sheet total")
+	flag.StringVar(&esppSearchPath, "espp-search", "", "cmd/esppsearch's espp-search.json (optional: without it the ESPP list has the shares-issued evidence only)")
 	out := flag.String("out", "sec", "output directory (created; must not exist)")
 	flag.Parse()
 	if err := run(*factsPath, *tickersPath, *reviewedPath, *sharesReviewedPath, *out, time.Now()); err != nil {
@@ -52,7 +53,37 @@ func main() {
 	}
 }
 
+// esppSearchPath is the full-text search evidence for the ESPP list (issue
+// #22); empty, missing or bad, the list keeps the shares-issued evidence only.
+var esppSearchPath string
+
+// readSearch reads and checks the search file, or nil with a warning.
+func readSearch(path string, now time.Time) *sec.SearchFile {
+	if path == "" {
+		return nil
+	}
+	b, err := os.ReadFile(path)
+	if err == nil && len(b) > 64<<20 {
+		err = fmt.Errorf("%d bytes", len(b))
+	}
+	var f sec.SearchFile
+	if err == nil {
+		dec := json.NewDecoder(bytes.NewReader(b))
+		dec.DisallowUnknownFields()
+		err = dec.Decode(&f)
+	}
+	if err == nil {
+		err = sec.ValidateSearch(&f, now)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "secbuild: ESPP search evidence left out: %v\n", err)
+		return nil
+	}
+	return &f
+}
+
 func run(factsPath, tickersPath, reviewedPath, sharesReviewedPath, out string, now time.Time) error {
+	search := readSearch(esppSearchPath, now)
 	var reviewed []sec.Class
 	if err := readReviewed(reviewedPath, &reviewed); err != nil {
 		return err
@@ -119,7 +150,7 @@ func run(factsPath, tickersPath, reviewedPath, sharesReviewedPath, out string, n
 			for e := range entries {
 				m := entryRe.FindStringSubmatch(e.Name)
 				cik, _ := strconv.ParseInt(m[1], 10, 64)
-				got, count, countErr, plan, planErr, err := readEntry(e, byCIK[cik], cik, balance[cik], now)
+				got, count, countErr, plan, planErr, err := readEntry(e, byCIK[cik], cik, balance[cik], now, search)
 				mu.Lock()
 				if err != nil {
 					// One company's bad file skips that company, not the snapshot.
@@ -220,7 +251,7 @@ func run(factsPath, tickersPath, reviewedPath, sharesReviewedPath, out string, n
 
 // readEntry extracts one company's facts once, for each of its symbols, its
 // share count and its ESPP evidence; a failure of one leaves the others.
-func readEntry(e *zip.File, symbols []string, cik int64, balance bool, now time.Time) (files []*sec.File, count sec.Shares, countErr error, plan *sec.Espp, planErr, err error) {
+func readEntry(e *zip.File, symbols []string, cik int64, balance bool, now time.Time, search *sec.SearchFile) (files []*sec.File, count sec.Shares, countErr error, plan *sec.Espp, planErr, err error) {
 	files, b, err := readFiles(e, symbols, cik, now)
 	if b == nil {
 		return nil, sec.Shares{}, nil, nil, nil, err
@@ -233,7 +264,7 @@ func readEntry(e *zip.File, symbols []string, cik int64, balance bool, now time.
 		}
 	}
 	count, countErr = sec.ExtractShares(b, cik, classes, balance, now)
-	plan, planErr = sec.ExtractEspp(b, cik, now)
+	plan, planErr = sec.ExtractEspp(b, cik, now, search)
 	return files, count, countErr, plan, planErr, err
 }
 

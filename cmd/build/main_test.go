@@ -614,7 +614,9 @@ func TestRunPublishesEsppList(t *testing.T) {
 		}
 		return out
 	}
-	plan := func(cik int64) sec.Espp { return sec.Espp{CIK: cik, Filed: "2026-07-29", Accn: "0001193125-26-323660"} }
+	plan := func(cik int64) sec.Espp {
+		return sec.Espp{CIK: cik, Filed: "2026-07-29", Accn: "0001193125-26-323660", How: sec.HowIssued}
+	}
 	good := func(dir string) {
 		secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z")
 		// REUSE's symbol is another company's in the earnings file's ticker list; NEWCO is not read.

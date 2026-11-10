@@ -12,15 +12,16 @@ import (
 // (vibistic-stocks#263, issue #20): which companies' SEC filings show one, in
 // v1/espp.json.
 //
-// A symbol is listed only when its company's 10-K, 10-Q or 10-KT filed in the
+// Strongest evidence first (How "issued"): a 10-K, 10-Q or 10-KT filed in the
 // last two years reports shares (unit "shares") or their value (unit "USD")
 // issued under an employee stock purchase plan, above zero, for a well-formed
 // period that ended in that time (us-gaap
 // StockIssuedDuringPeriodSharesEmployeeStockPurchasePlans or
 // StockIssuedDuringPeriodValueEmployeeStockPurchasePlan): shares actually
 // issued under a plan lately. Expense recognized for a plan is not issuance
-// (Codex review of PR #21). A symbol not listed is unknown, never "no plan":
-// many companies with a plan (Apple) tag neither (checked 2026-11-10).
+// (Codex review of PR #21). Without that, a plan named in the company's 10-K
+// or Form S-8, from EDGAR full-text search (esppsearch.go, issue #22). A symbol
+// not listed is unknown, never "no plan".
 //
 // No discount is published: the purchase-price tag is not specific to employee
 // stock purchase plans, and the bulk facts cannot tie it to one (Codex review
@@ -36,11 +37,14 @@ type EsppFile struct {
 	Symbols     map[string]Espp `json:"symbols"`
 }
 
-// Espp is one listed symbol: the newest filing that shows ESPP shares issued.
+// Espp is one listed symbol: its strongest evidence (How: shares issued, a
+// plan named in its 10-K, or one named in a Form S-8; issue #22) and that
+// filing.
 type Espp struct {
 	CIK   int64  `json:"cik"`
 	Filed string `json:"filed"` // yyyy-mm-dd
 	Accn  string `json:"accn"`
+	How   string `json:"how"`
 }
 
 // EsppIssued are the concepts, each in its unit, whose positive value for a
@@ -50,15 +54,14 @@ var EsppIssued = map[string]string{
 	"StockIssuedDuringPeriodValueEmployeeStockPurchasePlan":   "USD",
 }
 
-const (
-	esppMaxAge = 730 // days from the filing to the snapshot
-	// The app's own limit (src/sec/espp.ts MAX_SYMBOLS).
-	MaxEsppSymbols = 12000
-)
+// The app's own limit (src/sec/espp.ts MAX_SYMBOLS).
+const MaxEsppSymbols = 12000
 
-// ExtractEspp reads one company's companyfacts JSON. It returns nil when the
-// filings show no recent ESPP issuance.
-func ExtractEspp(b []byte, cik int64, now time.Time) (*Espp, error) {
+// ExtractEspp reads one company's companyfacts JSON. Shares issued under a
+// plan come first; otherwise the full-text search's 10-K or S-8 for the company
+// (search may be nil). It returns nil with neither, or when the company has no
+// public market for its common stock.
+func ExtractEspp(b []byte, cik int64, now time.Time, search *SearchFile) (*Espp, error) {
 	var cf struct {
 		CIK   json.RawMessage `json:"cik"`
 		Facts struct {
@@ -84,7 +87,7 @@ func ExtractEspp(b []byte, cik int64, now time.Time) (*Espp, error) {
 	if noFloat(float) {
 		return nil, nil
 	}
-	oldest := now.Add(-esppMaxAge * 24 * time.Hour)
+	oldest := now.Add(-time.Duration(esppHowAge[HowIssued]) * 24 * time.Hour)
 	var best *Espp
 	for concept, unit := range EsppIssued {
 		facts, err := readUnit(cf.Facts.USGAAP, concept, unit)
@@ -104,8 +107,13 @@ func ExtractEspp(b []byte, cik int64, now time.Time) (*Espp, error) {
 				continue
 			}
 			if best == nil || f.Filed > best.Filed || (f.Filed == best.Filed && f.Accn > best.Accn) {
-				best = &Espp{CIK: cik, Filed: f.Filed, Accn: f.Accn}
+				best = &Espp{CIK: cik, Filed: f.Filed, Accn: f.Accn, How: HowIssued}
 			}
+		}
+	}
+	if best == nil {
+		if h, how, ok := search.Best(cik); ok {
+			best = &Espp{CIK: cik, Filed: h.Filed, Accn: h.Accn, How: how}
 		}
 	}
 	return best, nil
@@ -134,7 +142,11 @@ func ValidateEspp(f *EsppFile) error {
 		if err := validateFiled(e.Filed, gen); err != nil {
 			return fmt.Errorf("%s: %w", sym, err)
 		}
-		if filed, _ := parseDate(e.Filed); gen.Sub(filed) > esppMaxAge*24*time.Hour {
+		age, ok := esppHowAge[e.How]
+		if !ok {
+			return fmt.Errorf("%s: how %q", sym, e.How)
+		}
+		if filed, _ := parseDate(e.Filed); gen.Sub(filed) > time.Duration(age)*24*time.Hour {
 			return fmt.Errorf("%s: filed %s", sym, e.Filed)
 		}
 	}
