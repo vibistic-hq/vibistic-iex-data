@@ -4,7 +4,8 @@
 // pass the acceptance checks.
 //
 // It also writes shares.json, every covered symbol's shares outstanding
-// (issue #18).
+// (issue #18), and espp.json, the symbols whose filings show an employee stock
+// purchase plan (issue #20).
 //
 //	secbuild -facts companyfacts.zip -tickers company_tickers_exchange.json -reviewed sec-reviewed.json -shares-reviewed shares-reviewed.json -out sec/
 package main
@@ -108,6 +109,7 @@ func run(factsPath, tickersPath, reviewedPath, sharesReviewedPath, out string, n
 	var mu sync.Mutex
 	files := map[string]*sec.File{}
 	shares := map[string]sec.Shares{}
+	espp := map[string]sec.Espp{}
 	skipped := 0
 	var wg sync.WaitGroup
 	for range runtime.NumCPU() {
@@ -117,7 +119,7 @@ func run(factsPath, tickersPath, reviewedPath, sharesReviewedPath, out string, n
 			for e := range entries {
 				m := entryRe.FindStringSubmatch(e.Name)
 				cik, _ := strconv.ParseInt(m[1], 10, 64)
-				got, count, countErr, err := readEntry(e, byCIK[cik], cik, balance[cik], now)
+				got, count, countErr, plan, planErr, err := readEntry(e, byCIK[cik], cik, balance[cik], now)
 				mu.Lock()
 				if err != nil {
 					// One company's bad file skips that company, not the snapshot.
@@ -139,6 +141,17 @@ func run(factsPath, tickersPath, reviewedPath, sharesReviewedPath, out string, n
 							continue
 						}
 						shares[sym] = count
+					}
+				}
+				// The plan stands on its own too. A preferred listing is not the
+				// common stock employees buy.
+				if planErr != nil {
+					fmt.Fprintf(os.Stderr, "secbuild: %s: ESPP: %v\n", e.Name, planErr)
+				} else if plan != nil {
+					for _, sym := range byCIK[cik] {
+						if !sec.Preferred(sym) {
+							espp[sym] = *plan
+						}
 					}
 				}
 				mu.Unlock()
@@ -182,6 +195,16 @@ func run(factsPath, tickersPath, reviewedPath, sharesReviewedPath, out string, n
 			os.Remove(filepath.Join(out, "shares.json"))
 		}
 	}
+	// The ESPP list is left out alone as well (issue #20).
+	ef := &sec.EsppFile{V: 1, Source: "SEC", GeneratedAt: now.UTC().Format(time.RFC3339), Symbols: espp}
+	if err := sec.ValidateEspp(ef); err != nil {
+		fmt.Fprintf(os.Stderr, "secbuild: ESPP list left out: %v\n", err)
+	} else if err := acceptEspp(espp); err != nil {
+		fmt.Fprintf(os.Stderr, "secbuild: ESPP list left out: %v\n", err)
+	} else if err := writeJSON(filepath.Join(out, "espp.json"), ef); err != nil {
+		fmt.Fprintf(os.Stderr, "secbuild: ESPP list left out: %v\n", err)
+		os.Remove(filepath.Join(out, "espp.json"))
+	}
 	syms := make([]string, 0, len(files))
 	for s, f := range files {
 		syms = append(syms, s)
@@ -195,12 +218,12 @@ func run(factsPath, tickersPath, reviewedPath, sharesReviewedPath, out string, n
 	return writeJSON(filepath.Join(out, "snapshot.json"), snap)
 }
 
-// readEntry extracts one company's facts once, for each of its symbols, and
-// its share count; a failure of either leaves the other.
-func readEntry(e *zip.File, symbols []string, cik int64, balance bool, now time.Time) (files []*sec.File, count sec.Shares, countErr, err error) {
+// readEntry extracts one company's facts once, for each of its symbols, its
+// share count and its ESPP evidence; a failure of one leaves the others.
+func readEntry(e *zip.File, symbols []string, cik int64, balance bool, now time.Time) (files []*sec.File, count sec.Shares, countErr error, plan *sec.Espp, planErr, err error) {
 	files, b, err := readFiles(e, symbols, cik, now)
 	if b == nil {
-		return nil, sec.Shares{}, nil, err
+		return nil, sec.Shares{}, nil, nil, nil, err
 	}
 	// Share classes of common stock: a preferred listing is not one.
 	classes := 0
@@ -210,7 +233,8 @@ func readEntry(e *zip.File, symbols []string, cik int64, balance bool, now time.
 		}
 	}
 	count, countErr = sec.ExtractShares(b, cik, classes, balance, now)
-	return files, count, countErr, err
+	plan, planErr = sec.ExtractEspp(b, cik, now)
+	return files, count, countErr, plan, planErr, err
 }
 
 func readFiles(e *zip.File, symbols []string, cik int64, now time.Time) ([]*sec.File, []byte, error) {
@@ -292,6 +316,26 @@ func acceptShares(shares map[string]sec.Shares) error {
 	for _, s := range mustHaveShares {
 		if shares[s].N == nil {
 			return fmt.Errorf("no share count for %s", s)
+		}
+	}
+	return nil
+}
+
+// Acceptance for the ESPP list (issue #20): 797 symbols on 2026-11-10,
+// so far fewer means something upstream changed; and a large filer known to
+// tag its plan among them.
+var (
+	minEspp      = 400
+	mustHaveEspp = []string{"MSFT"}
+)
+
+func acceptEspp(espp map[string]sec.Espp) error {
+	if len(espp) < minEspp {
+		return fmt.Errorf("only %d symbols (want at least %d)", len(espp), minEspp)
+	}
+	for _, s := range mustHaveEspp {
+		if _, ok := espp[s]; !ok {
+			return fmt.Errorf("%s missing", s)
 		}
 	}
 	return nil

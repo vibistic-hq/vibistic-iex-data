@@ -136,6 +136,17 @@ func run(daysDir, reviewedPath, secDir, earningsPath, out string, now time.Time)
 			manifest["shares"] = info
 		}
 	}
+	// Which symbols' filings show an employee stock purchase plan (issue #20),
+	// left out alone, with the same list of companies whose filings were read.
+	if secDir != "" {
+		info, err := copyEspp(filepath.Join(secDir, "espp.json"), filepath.Join(out, "v1", "espp.json"), filings, now)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "build: ESPP list left out: %v\n", err)
+			os.Remove(filepath.Join(out, "v1", "espp.json"))
+		} else {
+			manifest["espp"] = info
+		}
+	}
 	if err := writeJSON(filepath.Join(out, "v1", "manifest.json"), manifest); err != nil {
 		return err
 	}
@@ -241,7 +252,7 @@ func copySEC(dir, dst string, now time.Time) (map[string]any, error) {
 	n := 0
 	for _, p := range paths {
 		name := filepath.Base(p)
-		if name == "snapshot.json" || name == "shares.json" {
+		if name == "snapshot.json" || name == "shares.json" || name == "espp.json" {
 			continue
 		}
 		var f sec.File
@@ -328,6 +339,49 @@ func copyShares(path, dst string, filings *earnings.File, now time.Time) (map[st
 	fmt.Fprintf(os.Stderr, "build: %d share counts (%d depositary-share issuers and %d unread companies left out)\n", counted, ads, unread)
 	return map[string]any{"source": "SEC", "generatedAt": f.GeneratedAt, "symbols": len(f.Symbols), "counted": counted}, nil
 }
+
+// copyEspp checks the snapshot's ESPP list again and publishes it. A symbol
+// stays only when the earnings file lists it under the same company (the two
+// come from separate downloads of SEC's ticker list, a day apart at most, and a
+// symbol that moved to another company in between is dropped, not mislabeled).
+func copyEspp(path, dst string, filings *earnings.File, now time.Time) (map[string]any, error) {
+	if filings == nil {
+		return nil, fmt.Errorf("no earnings file to check the symbols against")
+	}
+	filers, _, err := earnings.PrivateLists(filings)
+	if err != nil {
+		return nil, fmt.Errorf("earnings file's filing lists: %w", err)
+	}
+	var f sec.EsppFile
+	if err := decodeStrict(path, &f, esppMaxFile); err != nil {
+		return nil, err
+	}
+	if err := sec.ValidateEspp(&f); err != nil {
+		return nil, err
+	}
+	gen, _ := time.Parse(time.RFC3339, f.GeneratedAt)
+	if age := now.Sub(gen); age > secMaxAge || age < -time.Hour {
+		return nil, fmt.Errorf("ESPP list from %s is too old or in the future", f.GeneratedAt)
+	}
+	dropped := 0
+	for sym, e := range f.Symbols {
+		if filers[sym] != e.CIK {
+			delete(f.Symbols, sym)
+			dropped++
+		}
+	}
+	if len(f.Symbols) == 0 {
+		return nil, fmt.Errorf("no symbols")
+	}
+	if err := writeJSON(dst, &f); err != nil {
+		return nil, err
+	}
+	fmt.Fprintf(os.Stderr, "build: %d symbols with an ESPP in their filings (%d unread or moved left out)\n", len(f.Symbols), dropped)
+	return map[string]any{"source": "SEC", "generatedAt": f.GeneratedAt, "symbols": len(f.Symbols)}, nil
+}
+
+// The ESPP list is about 60 KB.
+const esppMaxFile = 2 << 20
 
 // A symbol's SEC file is a few KB; anything near this is not one.
 const secMaxFile = 256 << 10
@@ -467,7 +521,7 @@ func indexPage(asOf string, symbols, covered int) string {
 <p>Daily bars built from IEX trades, for <a href="https://stocks.vibistic.com/">Vibistic Stocks</a>. Data as of the close of ` + e(asOf) + `: ` + fmt.Sprint(symbols) + ` symbols, ` + fmt.Sprint(covered) + ` with enough IEX trading to show numbers.</p>
 <p>` + e(series.Citation) + ` <a href="` + e(series.TermsURL) + `">IEX Historical Data Terms of Use</a>.</p>
 <p>The data reflects trading on IEX only, not other markets, and is a reference point only, not a basis for trading decisions. Not investment advice.</p>
-<p>Files: <code>v1/manifest.json</code>, <code>v1/s/{SYMBOL}.json</code> and, for symbols with enough IEX trading, <code>v1/og/{SYMBOL}.png</code> (the preview image of a Vibistic Stocks share link), and <code>v1/sec/{SYMBOL}.json</code> (revenue and net income from the company's SEC filings, as first reported), <code>v1/shares.json</code> (each company's shares outstanding as last reported on the cover of its SEC filings), and <code>v1/earnings.json</code> (each company's next earnings release date, estimated from its past SEC filings: a year after the matching one, so it can be off). How they are made: <a href="https://github.com/vibistic-hq/vibistic-iex-data">github.com/vibistic-hq/vibistic-iex-data</a>.</p>
+<p>Files: <code>v1/manifest.json</code>, <code>v1/s/{SYMBOL}.json</code> and, for symbols with enough IEX trading, <code>v1/og/{SYMBOL}.png</code> (the preview image of a Vibistic Stocks share link), and <code>v1/sec/{SYMBOL}.json</code> (revenue and net income from the company's SEC filings, as first reported), <code>v1/shares.json</code> (each company's shares outstanding as last reported on the cover of its SEC filings), <code>v1/espp.json</code> (the symbols whose recent SEC filings show shares issued under an employee stock purchase plan), and <code>v1/earnings.json</code> (each company's next earnings release date, estimated from its past SEC filings: a year after the matching one, so it can be off). How they are made: <a href="https://github.com/vibistic-hq/vibistic-iex-data">github.com/vibistic-hq/vibistic-iex-data</a>.</p>
 </body></html>
 `
 }

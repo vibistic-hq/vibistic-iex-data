@@ -20,7 +20,8 @@ size=$(awk -v n="$newest" '$1 == n {print $2}' <<<"$assets")
 tmp=$(mktemp -d)
 gh release download sec -p "$newest" -D "$tmp"
 # The whole listing first (no early exit that could hide a bad entry), then
-# every line checked: plain files named like a symbol or snapshot.json, and the
+# every line checked: plain files named like a symbol, snapshot.json, shares.json
+# or espp.json (issue #20), and the
 # top directory; bounded count and size.
 # The listing itself is capped (long owner names or PAX headers could make it
 # huge): a listing cut short, or one tar could not finish, is rejected.
@@ -35,7 +36,7 @@ awk -v max_n="$max_entries" -v max_b="$max_unpacked" \
   -v sym='^[.]/[A-Z][A-Z]?[A-Z]?[A-Z]?[A-Z]?[.]json$' -v cls='^[.]/[A-Z][A-Z]?[A-Z]?[A-Z]?[A-Z]?[.][A-Z][.]json$' '
   { n++ }
   substr($1, 1, 1) == "d" && $NF == "./" && NF == 6 { next }
-  substr($1, 1, 1) == "-" && NF == 6 && ($NF == "./snapshot.json" || $NF == "./shares.json" || $NF ~ sym || $NF ~ cls) { b += $3; next }
+  substr($1, 1, 1) == "-" && NF == 6 && ($NF == "./snapshot.json" || $NF == "./shares.json" || $NF == "./espp.json" || $NF ~ sym || $NF ~ cls) { b += $3; next }
   { bad++ }
   END { exit (bad > 0 || n > max_n || b > max_b) ? 1 : 0 }
 ' "$tmp/list" || skip "$newest holds unexpected entries or is too big"

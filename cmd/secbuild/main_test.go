@@ -65,6 +65,8 @@ func withShares(t *testing.T, b []byte, src string) []byte {
 	switch src {
 	case "AAPL":
 		facts["dei"] = map[string]any{"EntityCommonStockSharesOutstanding": units(map[string]any{"end": "2026-07-17", "val": 14594180000, "accn": "0000320193-26-000020", "form": "10-Q", "filed": "2026-07-31"})}
+		// Shares issued under an ESPP last quarter (issue #20).
+		gaap["StockIssuedDuringPeriodSharesEmployeeStockPurchasePlans"] = units(map[string]any{"start": "2026-03-29", "end": "2026-06-27", "val": 3000000, "accn": "0000320193-26-000020", "form": "10-Q", "filed": "2026-07-31"})
 	case "GOOGL":
 		facts["dei"] = map[string]any{"EntityCommonStockSharesOutstanding": units(map[string]any{"end": "2026-07-15", "val": 5800000000, "accn": "0001652044-26-000071", "form": "10-Q", "filed": "2026-07-23"})}
 		gaap["CommonStockSharesOutstanding"] = units(map[string]any{"end": "2026-06-30", "val": 12230000000, "accn": "0001652044-26-000071", "form": "10-Q", "filed": "2026-07-23"})
@@ -81,6 +83,8 @@ func TestSecbuild(t *testing.T) {
 	minFiles, mustHave = 4, []string{"AAPL", "NVDA"}
 	defer func(n int, m []string) { minShares, mustHaveShares = n, m }(minShares, mustHaveShares)
 	minShares, mustHaveShares = 3, []string{"AAPL", "GOOGL"}
+	defer func(n int, m []string) { minEspp, mustHaveEspp = n, m }(minEspp, mustHaveEspp)
+	minEspp, mustHaveEspp = 1, []string{"AAPL"}
 	zpath, tpath, rpath, spath := fixture(t)
 	out := filepath.Join(t.TempDir(), "sec")
 	if err := run(zpath, tpath, rpath, spath, out, now); err != nil {
@@ -92,7 +96,7 @@ func TestSecbuild(t *testing.T) {
 		got = append(got, filepath.Base(n))
 	}
 	// Both Alphabet classes (GOOG reviewed); not the broken entry, nor a file whose CIK is not its name's.
-	if strings.Join(got, ",") != "AAPL.P.json,AAPL.json,GOOG.json,GOOGL.json,NVDA.json,shares.json,snapshot.json" {
+	if strings.Join(got, ",") != "AAPL.P.json,AAPL.json,GOOG.json,GOOGL.json,NVDA.json,espp.json,shares.json,snapshot.json" {
 		t.Fatalf("files %v", got)
 	}
 	b, _ := os.ReadFile(filepath.Join(out, "GOOG.json"))
@@ -126,8 +130,44 @@ func TestSecbuild(t *testing.T) {
 	if _, ok := sf.Symbols["MISL"]; ok || len(sf.Symbols) != 5 {
 		t.Errorf("symbols %v", sf.Symbols)
 	}
+	// Only AAPL's filings show ESPP shares issued: not its preferred listing, not NVDA.
+	var ef sec.EsppFile
+	b, _ = os.ReadFile(filepath.Join(out, "espp.json"))
+	if err := json.Unmarshal(b, &ef); err != nil || sec.ValidateEspp(&ef) != nil {
+		t.Fatalf("espp.json: %v %s", err, b)
+	}
+	if a, ok := ef.Symbols["AAPL"]; !ok || len(ef.Symbols) != 1 || a.CIK != 320193 || a.Filed != "2026-07-31" || a.Accn != "0000320193-26-000020" {
+		t.Fatalf("espp %+v", ef.Symbols)
+	}
 	if err := run(zpath, tpath, rpath, spath, out, now); err == nil {
 		t.Fatal("overwrote an existing directory")
+	}
+}
+
+func TestSecbuildLeavesOutUnacceptedEsppList(t *testing.T) {
+	defer func(n int, m []string) { minFiles, mustHave = n, m }(minFiles, mustHave)
+	defer func(n int, m []string) { minShares, mustHaveShares = n, m }(minShares, mustHaveShares)
+	defer func(n int, m []string) { minEspp, mustHaveEspp = n, m }(minEspp, mustHaveEspp)
+	zpath, tpath, rpath, spath := fixture(t)
+	for name, set := range map[string]func(){
+		"too few":      func() { minEspp, mustHaveEspp = 2, nil },
+		"MSFT missing": func() { minEspp, mustHaveEspp = 0, []string{"MSFT"} },
+	} {
+		minFiles, mustHave = 1, []string{"AAPL"}
+		minShares, mustHaveShares = 0, nil
+		set()
+		out := filepath.Join(t.TempDir(), "sec")
+		if err := run(zpath, tpath, rpath, spath, out, now); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if _, err := os.Stat(filepath.Join(out, "espp.json")); !os.IsNotExist(err) {
+			t.Errorf("%s: espp.json written", name)
+		}
+		for _, f := range []string{"AAPL.json", "shares.json", "snapshot.json"} {
+			if _, err := os.Stat(filepath.Join(out, f)); err != nil {
+				t.Errorf("%s: %v", name, err)
+			}
+		}
 	}
 }
 

@@ -583,3 +583,97 @@ func TestRunPublishesShareCounts(t *testing.T) {
 		})
 	}
 }
+
+func esppSnapshot(t *testing.T, dir, generated string, symbols map[string]sec.Espp) {
+	t.Helper()
+	os.MkdirAll(dir, 0o755)
+	b, _ := json.Marshal(sec.EsppFile{V: 1, Source: "SEC", GeneratedAt: generated, Symbols: symbols})
+	os.WriteFile(filepath.Join(dir, "espp.json"), b, 0o644)
+}
+
+func TestRunPublishesEsppList(t *testing.T) {
+	when := time.Date(2026, 10, 10, 7, 0, 0, 0, time.UTC)
+	build := func(t *testing.T, snapshot func(dir string), withEarnings func(path string)) string {
+		tmp := t.TempDir()
+		days := filepath.Join(tmp, "days")
+		os.Mkdir(days, 0o755)
+		aapl := tops.Summary{Symbol: "AAPL", Open: 100_0000, High: 101_0000, Low: 99_0000, Close: 100_5000, Volume: 10_000, Notional: 1_005_000, Trades: 10, LotTrades: 10}
+		writeDay(t, days, "2026-10-09", aapl)
+		reviewed := filepath.Join(tmp, "reviewed.json")
+		os.WriteFile(reviewed, []byte("[]"), 0o644)
+		secDir := filepath.Join(tmp, "sec")
+		snapshot(secDir)
+		earningsPath := ""
+		if withEarnings != nil {
+			earningsPath = filepath.Join(tmp, "earnings.json")
+			withEarnings(earningsPath)
+		}
+		out := filepath.Join(tmp, "site")
+		if err := run(days, reviewed, secDir, earningsPath, out, when); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	plan := func(cik int64) sec.Espp { return sec.Espp{CIK: cik, Filed: "2026-07-29", Accn: "0001193125-26-323660"} }
+	good := func(dir string) {
+		secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z")
+		// REUSE's symbol is another company's in the earnings file's ticker list; NEWCO is not read.
+		esppSnapshot(t, dir, "2026-10-09T09:30:00Z", map[string]sec.Espp{"MSFT": plan(789019), "INTC": plan(50863), "REUSE": plan(55), "NEWCO": plan(21)})
+	}
+	filers := func(p string) {
+		earningsWithFilers(t, p, map[string]int64{"AAPL": 320193, "MSFT": 789019, "INTC": 50863, "REUSE": 66}, nil)
+	}
+	t.Run("good", func(t *testing.T) {
+		out := build(t, good, filers)
+		var f sec.EsppFile
+		if err := decodeStrict(filepath.Join(out, "v1", "espp.json"), &f, esppMaxFile); err != nil || sec.ValidateEspp(&f) != nil {
+			t.Fatal(err)
+		}
+		if len(f.Symbols) != 2 || f.Symbols["MSFT"].CIK != 789019 || f.Symbols["INTC"].CIK != 50863 {
+			t.Fatalf("symbols %+v", f.Symbols)
+		}
+		// Never copied as a symbol's SEC file, and the SEC files still publish.
+		if _, err := os.Stat(filepath.Join(out, "v1", "sec", "espp.json")); !os.IsNotExist(err) {
+			t.Fatal("espp.json copied as a symbol file")
+		}
+		if _, err := os.Stat(filepath.Join(out, "v1", "sec", "AAPL.json")); err != nil {
+			t.Fatal(err)
+		}
+		m, _ := os.ReadFile(filepath.Join(out, "v1", "manifest.json"))
+		if !strings.Contains(string(m), `"espp":{"generatedAt":"2026-10-09T09:30:00Z","source":"SEC","symbols":2}`) {
+			t.Fatalf("manifest = %s", m)
+		}
+	})
+	for name, tc := range map[string]struct {
+		snapshot     func(dir string)
+		withEarnings func(path string)
+	}{
+		"missing":     {func(dir string) { secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z") }, filers},
+		"no earnings": {good, nil},
+		"no filers":   {good, func(p string) { earningsWithFilers(t, p, nil, nil) }},
+		"stale": {func(dir string) {
+			secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z")
+			esppSnapshot(t, dir, "2026-09-20T09:30:00Z", map[string]sec.Espp{"MSFT": plan(789019)})
+		}, filers},
+		"invalid": {func(dir string) {
+			secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z")
+			bad := plan(789019)
+			bad.Accn = "x"
+			esppSnapshot(t, dir, "2026-10-09T09:30:00Z", map[string]sec.Espp{"MSFT": bad})
+		}, filers},
+		"none kept": {func(dir string) {
+			secSnapshot(t, dir, "AAPL", "2026-10-09T09:30:00Z")
+			esppSnapshot(t, dir, "2026-10-09T09:30:00Z", map[string]sec.Espp{"NEWCO": plan(21)})
+		}, filers},
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := build(t, tc.snapshot, tc.withEarnings)
+			if _, err := os.Stat(filepath.Join(out, "v1", "espp.json")); !os.IsNotExist(err) {
+				t.Fatalf("v1/espp.json published: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(out, "v1", "sec", "AAPL.json")); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
