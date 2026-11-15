@@ -13,8 +13,11 @@
 #       (label hist-list-back), closed again if IEX refuses it later
 #     - archive failing after it worked: one issue (label nightly-failing) with
 #       the log tail; when a run works again: a comment and the issue closed
-#   scripts/notify.sh local EVENT DETAIL   (notify.yml, sent from the desktop)
-#     EVENT failed: an issue (label fund-index-local); recovered: comment, close
+#   scripts/notify.sh local RESULT DETAIL   (notify.yml, sent from the desktop)
+#     The desktop sends every run's result, not changes: failed opens an issue
+#     (label fund-index-local) unless one is open; ok comments on and closes it.
+#     So the open issue is the record, and a lost or replaced dispatch is put
+#     right by the next run.
 #
 # Writes changed=1 to $GITHUB_OUTPUT (if set) when STATE changed.
 set -euo pipefail
@@ -36,8 +39,20 @@ close_alerts() { # close_alerts LABEL COMMENT: comment on and close every open o
   open=$(open_issues "$1") || { echo "could not list $1 issues" >&2; return 1; }
   for n in $open; do
     gh issue comment "$n" --body "@$OWNER $2"
+    # Marks the alert as ended by the problem going away (not muted by hand).
+    gh issue edit "$n" --add-label auto-closed
     gh issue close "$n"
   done
+}
+# last_auto_closed LABEL: true if the newest issue with that label was closed by
+# this script. Then a "still failing" state is stale (a recovery whose saved
+# state was lost) and a new problem must alert again; one the owner closed by
+# hand stays muted.
+last_auto_closed() {
+  local labels
+  labels=$(gh issue list --state all --label "$1" --limit 1 --json labels --jq '.[].labels[].name') \
+    || { echo "could not list $1 issues" >&2; return 1; }
+  grep -qx auto-closed <<<"$labels"
 }
 # Text from logs or the desktop goes inside a fenced block; a fence in it would
 # end the block early, so backticks are swapped for quotes, and it is bounded.
@@ -64,7 +79,7 @@ nightly)
   # Opening alerts only on a change (one per outage, not one per run); closing
   # on every run whose result says so, so an issue left open by a lost state
   # (an evicted cache) never hides the next alert.
-  if [ "$list" = refused ] && [ "$new_list" = working ]; then
+  if [ "$new_list" = working ] && { [ "$list" = refused ] || last_auto_closed hist-list-back; }; then
     open_alert hist-list-back "IEX's HIST list is answering again" \
       "IEX's HIST list (https://iextrading.com/api/1.0/hist) answered $INDEX_CODE instead of 403. Nightly uses it again on its own; the bucket fallback (#25) stays for the next refusal, and \`backfill.yml\` works again. Run: $RUN_URL"
   elif [ "$INDEX_CODE" = 403 ]; then
@@ -72,7 +87,7 @@ nightly)
   fi
   if [ "$ARCHIVE_RESULT" = success ]; then
     close_alerts nightly-failing "Nightly works again. Run: $RUN_URL"
-  elif [ "$nightly" = ok ] && [ "$new_nightly" = failing ]; then
+  elif [ "$new_nightly" = failing ] && { [ "$nightly" = ok ] || last_auto_closed nightly-failing; }; then
     log=""; [ -f "${FAILED_LOG:-}" ] && log=$(cat "$FAILED_LOG")
     open_alert nightly-failing "Nightly failed: IEX data is not being updated" \
       "Nightly's archive job failed, so new IEX days are not being added (with IEX's list refused, this includes reading IEX's bucket). One alert per outage; a working run closes this issue. Run: $RUN_URL
@@ -94,8 +109,8 @@ local)
         "The local Fund index job (TL;DR 13F index, run by a systemd timer on the desktop while GitHub Actions is off) failed, so tldr.vibistic.com keeps its last index. Log: ~/vibistic-local-jobs/logs on the desktop. A later good run closes this issue.
 
 $(fenced "$detail")" ;;
-    recovered) close_alerts fund-index-local "The local Fund index job works again." ;;
-    *) echo "usage: notify.sh local failed|recovered [DETAIL]" >&2; exit 2 ;;
+    ok) close_alerts fund-index-local "The local Fund index job works again." ;;
+    *) echo "usage: notify.sh local failed|ok [DETAIL]" >&2; exit 2 ;;
   esac
   ;;
 *) echo "usage: notify.sh nightly | local EVENT [DETAIL]" >&2; exit 2 ;;

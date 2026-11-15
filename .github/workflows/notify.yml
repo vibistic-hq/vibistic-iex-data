@@ -4,16 +4,18 @@ name: Notify
 # while GitHub Actions is off for private repos): the desktop starts this with
 # `gh workflow run`, and the issue it opens is the bot's, assigned to the owner,
 # so GitHub emails them (scripts/notify.sh, issue #27). Only people with write
-# access can start it. Inputs reach the script as environment variables, never
+# access can start it. Each desktop run sends its result (not a change), so when
+# this group replaces a pending run with a newer one, the newest result wins,
+# which is the one that matters. Inputs reach the script as environment variables, never
 # pasted into the script, and DETAIL is shown in a fenced block.
 on:
   workflow_dispatch:
     inputs:
       event:
-        description: failed or recovered
+        description: The desktop run's result, failed or ok
         required: true
         type: choice
-        options: [failed, recovered]
+        options: [failed, ok]
       detail:
         description: Short error text (public)
         required: false
