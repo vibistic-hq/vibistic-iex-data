@@ -11,6 +11,7 @@ cat > "$dir/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FAKE/calls"
 if [ "$1 $2" = "issue list" ]; then
+  [ -f "$FAKE/list-fails" ] && exit 1
   while [ $# -gt 0 ]; do [ "$1" = --label ] && label=$2; shift; done
   cat "$FAKE/open-$label" 2>/dev/null || true
 fi
@@ -19,6 +20,7 @@ chmod +x "$dir/bin/gh"
 export FAKE="$dir" PATH="$dir/bin:$PATH" STATE="$dir/state" RUN_URL="https://example.test/run/1"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 calls() { grep -c "$1" "$dir/calls" 2>/dev/null || true; }
+acted() { grep -cE '^issue (create|comment|close)' "$dir/calls" 2>/dev/null || true; }
 nightly() { # nightly ARCHIVE_RESULT INDEX_CODE
   : > "$dir/calls"; : > "$dir/out"
   ARCHIVE_RESULT=$1 INDEX_CODE=$2 GITHUB_OUTPUT="$dir/out" bash "$script" nightly
@@ -31,7 +33,7 @@ nightly success 403
 grep -q changed=1 "$dir/out" || fail "first state not saved"
 # Same again: nothing sent, state unchanged, not saved again.
 nightly success 403
-[ ! -s "$dir/calls" ] || fail "called gh with nothing new: $(cat "$dir/calls")"
+[ "$(acted)" = 0 ] || fail "acted with nothing new: $(cat "$dir/calls")"
 ! grep -q changed=1 "$dir/out" || fail "saved an unchanged state"
 
 # The list answers again (200, or 404 for a day without a file): one issue.
@@ -48,7 +50,7 @@ nightly success 200
 [ "$(calls 'issue create')" = 0 ] || fail "second list-back issue"
 # A network error says nothing: state kept, nothing sent.
 nightly success curl-failed
-[ "$(calls 'issue')" = 0 ] && grep -q '^list=working$' "$STATE" || fail "network error changed the list state"
+[ "$(acted)" = 0 ] && grep -q '^list=working$' "$STATE" || fail "network error changed the list state"
 # Refused again: the open issue is commented on and closed.
 echo 41 > "$dir/open-hist-list-back"
 nightly success 403
@@ -69,7 +71,7 @@ nightly failure 403
 # Cancelled or skipped: unknown, nothing changes.
 for r in cancelled skipped; do
   nightly "$r" 403
-  [ ! -s "$dir/calls" ] && grep -q '^nightly=failing$' "$STATE" || fail "$r changed the state"
+  [ "$(acted)" = 0 ] && grep -q '^nightly=failing$' "$STATE" || fail "$r changed the state"
 done
 # Works again: comment + close.
 echo 77 > "$dir/open-nightly-failing"
@@ -81,6 +83,31 @@ rm -f "$STATE"; printf 'list=refused\nnightly=ok\n' > "$STATE"
 nightly failure 403
 [ "$(calls 'issue create')" = 0 ] || fail "duplicate issue while one is open"
 rm -f "$dir/open-nightly-failing"
+# State lost (evicted cache) during an outage: a good run still closes the
+# open failure issue, so it cannot hide the next outage's alert.
+echo 78 > "$dir/open-nightly-failing"
+rm -f "$STATE"
+nightly success 403
+grep -q '^issue close 78$' "$dir/calls" || fail "open failure issue not closed after state loss"
+rm -f "$dir/open-nightly-failing"
+# Same for the list: refused again while the state says refused.
+echo 42 > "$dir/open-hist-list-back"
+printf 'list=refused\nnightly=ok\n' > "$STATE"
+nightly success 403
+grep -q '^issue close 42$' "$dir/calls" || fail "open list-back issue not closed while refused"
+rm -f "$dir/open-hist-list-back"
+# GitHub failing to list issues stops the run and keeps the old state, both
+# when closing (recovery) and when opening (a new failure): no duplicates.
+touch "$dir/list-fails"
+printf 'list=refused\nnightly=failing\n' > "$STATE"
+rc=0; nightly success 403 2>/dev/null || rc=$?
+[ "$rc" != 0 ] && grep -q '^nightly=failing$' "$STATE" || fail "recovery recorded although the lookup failed (rc $rc)"
+printf 'list=refused\nnightly=ok\n' > "$STATE"
+rc=0; FAILED_LOG=/dev/null nightly failure 500 2>/dev/null || rc=$?
+[ "$rc" != 0 ] && [ "$(calls 'issue create')" = 0 ] && grep -q '^nightly=ok$' "$STATE" || fail "failure handled although the lookup failed (rc $rc)"
+rc=0; bash "$script" local recovered 2>/dev/null || rc=$?
+[ "$rc" != 0 ] || fail "local recovered succeeded although the lookup failed"
+rm -f "$dir/list-fails"
 # A state file with junk falls back to the defaults.
 printf 'list=$(rm -rf /)\nnightly=maybe\n' > "$STATE"
 nightly success 403

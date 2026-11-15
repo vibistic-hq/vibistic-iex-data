@@ -23,13 +23,18 @@ OWNER="${NOTIFY_OWNER:-paragkalra}"
 open_issues() { # open_issues LABEL: numbers of open issues with that label
   gh issue list --state open --label "$1" --json number --jq '.[].number'
 }
+# A failed lookup must stop the run (and so keep the old state): read as "no
+# issue open", it would close nothing yet record the change, or open duplicates.
 open_alert() { # open_alert LABEL TITLE BODY: an issue unless one is open
-  if [ -n "$(open_issues "$1")" ]; then echo "an open $1 issue already exists" >&2; return 0; fi
+  local open
+  open=$(open_issues "$1") || { echo "could not list $1 issues" >&2; return 1; }
+  if [ -n "$open" ]; then echo "an open $1 issue already exists" >&2; return 0; fi
   gh issue create --label "$1" --assignee "$OWNER" --title "$2" --body "@$OWNER $3"
 }
 close_alerts() { # close_alerts LABEL COMMENT: comment on and close every open one
-  local n
-  for n in $(open_issues "$1"); do
+  local n open
+  open=$(open_issues "$1") || { echo "could not list $1 issues" >&2; return 1; }
+  for n in $open; do
     gh issue comment "$n" --body "@$OWNER $2"
     gh issue close "$n"
   done
@@ -56,20 +61,23 @@ nightly)
     failure) new_nightly=failing ;;
   esac # cancelled or skipped: unknown
 
+  # Opening alerts only on a change (one per outage, not one per run); closing
+  # on every run whose result says so, so an issue left open by a lost state
+  # (an evicted cache) never hides the next alert.
   if [ "$list" = refused ] && [ "$new_list" = working ]; then
     open_alert hist-list-back "IEX's HIST list is answering again" \
       "IEX's HIST list (https://iextrading.com/api/1.0/hist) answered $INDEX_CODE instead of 403. Nightly uses it again on its own; the bucket fallback (#25) stays for the next refusal, and \`backfill.yml\` works again. Run: $RUN_URL"
-  elif [ "$list" = working ] && [ "$new_list" = refused ]; then
+  elif [ "$INDEX_CODE" = 403 ]; then
     close_alerts hist-list-back "IEX refuses the HIST list again (403); Nightly reads its bucket. Run: $RUN_URL"
   fi
-  if [ "$nightly" = ok ] && [ "$new_nightly" = failing ]; then
+  if [ "$ARCHIVE_RESULT" = success ]; then
+    close_alerts nightly-failing "Nightly works again. Run: $RUN_URL"
+  elif [ "$nightly" = ok ] && [ "$new_nightly" = failing ]; then
     log=""; [ -f "${FAILED_LOG:-}" ] && log=$(cat "$FAILED_LOG")
     open_alert nightly-failing "Nightly failed: IEX data is not being updated" \
       "Nightly's archive job failed, so new IEX days are not being added (with IEX's list refused, this includes reading IEX's bucket). One alert per outage; a working run closes this issue. Run: $RUN_URL
 
 $(fenced "$log")"
-  elif [ "$nightly" = failing ] && [ "$new_nightly" = ok ]; then
-    close_alerts nightly-failing "Nightly works again. Run: $RUN_URL"
   fi
 
   printf 'list=%s\nnightly=%s\n' "$new_list" "$new_nightly" > "$STATE.new"
