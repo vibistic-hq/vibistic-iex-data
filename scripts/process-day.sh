@@ -9,6 +9,9 @@
 # it, and exit 5 skips that same file on later runs without downloading it
 # again (about 9 GB). A replaced file has a new generation and is read again.
 #
+# When IEX's index refuses (403, since 2026-11-14), the file is found by its
+# fixed name in IEX's public bucket instead (issue #25).
+#
 #   scripts/process-day.sh YYYYMMDD DIR
 set -euo pipefail
 d="${1:?date YYYYMMDD}"
@@ -18,15 +21,59 @@ bin="${IEXAGG:-$(dirname "$0")/../bin/iexagg}"
 
 index="$(mktemp)"
 # The index for one day is a few hundred bytes: bounded in size and time.
-code="$(curl -s --retry 3 --max-time 60 --max-filesize 1000000 -o "$index" -w '%{http_code}' "https://iextrading.com/api/1.0/hist?date=$d")"
+# A transport failure becomes a plain failure (exit 1), never curl's own exit
+# code: 3, 4 and 5 mean "no file", "incomplete" and "skip" to the workflows.
+code="$(curl -s --retry 3 --max-time 60 --max-filesize 1000000 -o "$index" -w '%{http_code}' "https://iextrading.com/api/1.0/hist?date=$d")" || code="curl-failed"
 if [ "$code" = 404 ]; then
   echo "no IEX HIST file for $d" >&2
   exit 3
 fi
-[ "$code" = 200 ] || { echo "HIST index answered $code for $d" >&2; exit 1; }
-link="$(jq -r '[.[] | select(.feed == "TOPS" and .version == "1.6")][0].link // empty' "$index")"
-rm -f "$index"
-[ -n "$link" ] || { echo "no TOPS 1.6 file listed for $d" >&2; exit 3; }
+if [ "$code" = 403 ]; then
+  # Since 2026-11-14 IEX refuses the index ("not currently available for direct
+  # download") while still putting each day's file in its public bucket under a
+  # fixed name (issue #25). Read that object's metadata instead: 404 means no
+  # file that day, as the index's 404 did, and its generation makes the link
+  # name this exact file, so the incomplete-file record below still works. The
+  # index is used again whenever it answers.
+  rm -f "$index"
+  object_of() { printf 'data%%2Ffeeds%%2F%s%%2F%s_IEXTP1_TOPS1.6.pcap.gz' "$1" "$1"; }
+  meta_code() { # meta_code DAY FILE: the bucket's answer for DAY's object, body in FILE
+    curl -s --retry 3 --max-time 60 --max-filesize 100000 -o "$2" -w '%{http_code}' "https://www.googleapis.com/storage/v1/b/iex/o/$(object_of "$1")"
+  }
+  object="$(object_of "$d")"
+  meta="$(mktemp)"
+  # A transport failure must not leak curl's own exit code: 3, 4 and 5 mean
+  # something else to the workflows. It becomes a plain failure below.
+  code="$(meta_code "$d" "$meta")" || code="curl-failed"
+  # A missing object answers 401 to anonymous callers (they may not list the
+  # bucket), so 401 or 404 is "no file that day" (today before IEX posts it, a
+  # holiday). That also is what a bucket closed to us would answer, so it counts
+  # only while one of the 10 days before is readable; otherwise it is a failure.
+  if [ "$code" = 404 ] || [ "$code" = 401 ]; then
+    readable=""
+    for back in 1 2 3 4 5 6 7 8 9 10; do
+      prev="$(date -u -d "${d:0:4}-${d:4:2}-${d:6:2} -$back day" +%Y%m%d)"
+      # A 200 that then fails in transfer (curl 18, 28) is no proof either.
+      c="$(meta_code "$prev" "$meta")" || c="curl-failed"
+      [ "$c" = 200 ] && { readable="$prev"; break; }
+    done
+    rm -f "$meta"
+    [ -n "$readable" ] || { echo "IEX's bucket has no readable file for $d or the 10 days before: closed?" >&2; exit 1; }
+    echo "no IEX HIST file for $d (index refused, none in IEX's bucket)" >&2
+    exit 3
+  fi
+  [ "$code" = 200 ] || { rm -f "$meta"; echo "HIST index refused and IEX's bucket answered $code for $d" >&2; exit 1; }
+  gen="$(jq -r '.generation // empty' "$meta" 2>/dev/null || true)"
+  rm -f "$meta"
+  [[ "$gen" =~ ^[0-9]{1,20}$ ]] || { echo "IEX's bucket gave no usable generation for $d" >&2; exit 1; }
+  echo "HIST index refused; reading $d from IEX's bucket" >&2
+  link="https://www.googleapis.com/download/storage/v1/b/iex/o/$object?generation=$gen&alt=media"
+else
+  [ "$code" = 200 ] || { echo "HIST index answered $code for $d" >&2; exit 1; }
+  link="$(jq -r '[.[] | select(.feed == "TOPS" and .version == "1.6")][0].link // empty' "$index")"
+  rm -f "$index"
+  [ -n "$link" ] || { echo "no TOPS 1.6 file listed for $d" >&2; exit 3; }
+fi
 # Only IEX's own storage bucket, never wherever a changed index might point. The
 # object name is one percent-encoded path segment (data%2Ffeeds%2F...), so the link
 # must have no further '/', no '..', no encoded dot or backslash, and only a plain
