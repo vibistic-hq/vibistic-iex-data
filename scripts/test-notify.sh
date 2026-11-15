@@ -135,6 +135,16 @@ printf 'list=working\nnightly=ok\n' > "$STATE"
 nightly success 200
 [ "$(calls 'issue create')" = 0 ] || fail "list-back alerted again while working"
 rm -f "$dir/last-hist-list-back"
+# Stale state plus an auto-closed newest issue, but this run proves nothing (a
+# cancelled or skipped archive, a network error on the list): no alert.
+printf 'list=working\nnightly=failing\n' > "$STATE"
+echo auto-closed > "$dir/last-nightly-failing"
+echo auto-closed > "$dir/last-hist-list-back"
+for r in cancelled skipped; do
+  nightly "$r" curl-failed
+  [ "$(calls 'issue create')" = 0 ] || fail "false alert on $r with a network error"
+done
+rm -f "$dir/last-nightly-failing" "$dir/last-hist-list-back"
 # A state file with junk falls back to the defaults.
 printf 'list=$(rm -rf /)\nnightly=maybe\n' > "$STATE"
 nightly success 403

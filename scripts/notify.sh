@@ -79,7 +79,9 @@ nightly)
   # Opening alerts only on a change (one per outage, not one per run); closing
   # on every run whose result says so, so an issue left open by a lost state
   # (an evicted cache) never hides the next alert.
-  if [ "$new_list" = working ] && { [ "$list" = refused ] || last_auto_closed hist-list-back; }; then
+  # Opening needs this run's own evidence (a 200/404, a failed archive), never
+  # a state carried over from earlier runs.
+  if { [ "$INDEX_CODE" = 200 ] || [ "$INDEX_CODE" = 404 ]; } && { [ "$list" = refused ] || last_auto_closed hist-list-back; }; then
     open_alert hist-list-back "IEX's HIST list is answering again" \
       "IEX's HIST list (https://iextrading.com/api/1.0/hist) answered $INDEX_CODE instead of 403. Nightly uses it again on its own; the bucket fallback (#25) stays for the next refusal, and \`backfill.yml\` works again. Run: $RUN_URL"
   elif [ "$INDEX_CODE" = 403 ]; then
@@ -87,7 +89,7 @@ nightly)
   fi
   if [ "$ARCHIVE_RESULT" = success ]; then
     close_alerts nightly-failing "Nightly works again. Run: $RUN_URL"
-  elif [ "$new_nightly" = failing ] && { [ "$nightly" = ok ] || last_auto_closed nightly-failing; }; then
+  elif [ "$ARCHIVE_RESULT" = failure ] && { [ "$nightly" = ok ] || last_auto_closed nightly-failing; }; then
     log=""; [ -f "${FAILED_LOG:-}" ] && log=$(cat "$FAILED_LOG")
     open_alert nightly-failing "Nightly failed: IEX data is not being updated" \
       "Nightly's archive job failed, so new IEX days are not being added (with IEX's list refused, this includes reading IEX's bucket). One alert per outage; a working run closes this issue. Run: $RUN_URL
