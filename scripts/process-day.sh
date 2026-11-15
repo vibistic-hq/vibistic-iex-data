@@ -21,7 +21,9 @@ bin="${IEXAGG:-$(dirname "$0")/../bin/iexagg}"
 
 index="$(mktemp)"
 # The index for one day is a few hundred bytes: bounded in size and time.
-code="$(curl -s --retry 3 --max-time 60 --max-filesize 1000000 -o "$index" -w '%{http_code}' "https://iextrading.com/api/1.0/hist?date=$d")"
+# A transport failure becomes a plain failure (exit 1), never curl's own exit
+# code: 3, 4 and 5 mean "no file", "incomplete" and "skip" to the workflows.
+code="$(curl -s --retry 3 --max-time 60 --max-filesize 1000000 -o "$index" -w '%{http_code}' "https://iextrading.com/api/1.0/hist?date=$d")" || code="curl-failed"
 if [ "$code" = 404 ]; then
   echo "no IEX HIST file for $d" >&2
   exit 3
@@ -40,7 +42,9 @@ if [ "$code" = 403 ]; then
   }
   object="$(object_of "$d")"
   meta="$(mktemp)"
-  code="$(meta_code "$d" "$meta")"
+  # A transport failure must not leak curl's own exit code: 3, 4 and 5 mean
+  # something else to the workflows. It becomes a plain failure below.
+  code="$(meta_code "$d" "$meta")" || code="curl-failed"
   # A missing object answers 401 to anonymous callers (they may not list the
   # bucket), so 401 or 404 is "no file that day" (today before IEX posts it, a
   # holiday). That also is what a bucket closed to us would answer, so it counts

@@ -32,6 +32,7 @@ if [ -n "$out" ] && [[ "$args" == *storage/v1/b/iex/o/* ]]; then
   answer="$(cat "$FAKE/meta")"
   [[ "$url" == *20010102* ]] || answer="$(cat "$FAKE/meta-prev" 2>/dev/null || echo 1)"
   case "$answer" in
+    curlexit*) exit "${answer#curlexit}" ;;
     401) printf 401 ;;
     404) printf 404 ;;
     500) printf 500 ;;
@@ -45,6 +46,7 @@ if [ -n "$out" ]; then
   case "$(cat "$FAKE/index" 2>/dev/null)" in
     404) printf 404; exit 0 ;;
     403) printf 403; exit 0 ;;
+    curlexit*) i="$(cat "$FAKE/index")"; exit "${i#curlexit}" ;;
     500) printf 500; exit 0 ;;
     nofeed) printf '[{"link":"x","feed":"DEEP","version":"1.0"}]' > "$out"; printf 200; exit 0 ;;
   esac
@@ -228,6 +230,26 @@ rm -f "$dir/meta-prev"
 # The bucket failing, or metadata without a usable generation: a plain failure.
 for meta in 500 nogen badgen; do
   echo "$meta" > "$dir/meta"
+  run 1 IEX_INCOMPLETE="$list"
+done
+want_downloads "$n"
+# curl itself failing on the metadata (exit 3, 4 or 5: codes the workflows read
+# as no file, incomplete, skip) is a plain failure, never passed on.
+echo 403 > "$dir/index"
+for c in 3 4 5 6; do
+  echo "curlexit$c" > "$dir/meta"
+  run 1 IEX_INCOMPLETE="$list"
+done
+# A transport failure on an earlier day only means that day is not proof the
+# bucket is readable; the next earlier day is tried.
+echo 401 > "$dir/meta"
+echo curlexit5 > "$dir/meta-prev"
+run 1 IEX_INCOMPLETE="$list"
+rm -f "$dir/meta-prev"
+want_downloads "$n"
+# The same for the index request itself.
+for c in 3 4 5 6; do
+  echo "curlexit$c" > "$dir/index"
   run 1 IEX_INCOMPLETE="$list"
 done
 want_downloads "$n"
