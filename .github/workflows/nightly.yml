@@ -92,3 +92,60 @@ jobs:
       pages: write
       id-token: write
     uses: ./.github/workflows/publish.yml
+
+  # Emails the owner through GitHub issues (scripts/notify.sh, issue #27) when
+  # something changes: archive starts failing (this includes IEX's bucket, read
+  # while IEX refuses its HIST list) or works again, and IEX's HIST list
+  # answering again. The last state is kept in the Actions cache, so a long
+  # outage alerts once, not on each of the 19 runs a day.
+  notify:
+    needs: archive
+    if: always() && github.repository == 'vibistic-hq/vibistic-iex-data' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+      actions: read # the failed run's log
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: notify-state.txt
+          key: notify-state-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: notify-state-
+      - id: notify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ARCHIVE_RESULT: ${{ needs.archive.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ID: ${{ github.run_id }}
+          STATE: notify-state.txt
+          FAILED_LOG: failed.log
+        run: |
+          # The last weekday before today in New York: a day IEX's list knows.
+          d=$(TZ=America/New_York date -d yesterday +%Y%m%d)
+          while [ "$(date -d "$d" +%u)" -gt 5 ]; do d=$(date -d "$d -1 day" +%Y%m%d); done
+          INDEX_CODE=$(curl -s -o /dev/null --max-time 60 -w '%{http_code}' "https://iextrading.com/api/1.0/hist?date=$d") || INDEX_CODE=curl-failed
+          export INDEX_CODE
+          echo "HIST list for $d answered $INDEX_CODE; archive $ARCHIVE_RESULT"
+          if [ "$ARCHIVE_RESULT" = failure ]; then
+            # The finished archive job's own log (the run's is not ready while
+            # this job runs): the 30 lines up to its first error, timestamps
+            # and colour codes off. Best effort: the alert goes out without it.
+            job=$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID/jobs" --jq '.jobs[] | select(.name == "archive") | .id' | head -1) || job=""
+            if [ -n "$job" ]; then
+              gh api "repos/$GH_REPO/actions/jobs/$job/logs" 2>/dev/null \
+                | sed -E 's/\x1b\[[0-9;]*m//g; s/^[0-9TZ:.-]+ //' \
+                | awk '{ buf[NR % 30] = $0 } /##\[error\]/ { for (i = NR - 29; i <= NR; i++) if (i > 0) print buf[i % 30]; exit }' > "$FAILED_LOG" || true
+            fi
+          fi
+          scripts/notify.sh nightly
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.notify.outputs.changed == '1'
+        with:
+          path: notify-state.txt
+          key: notify-state-${{ github.run_id }}-${{ github.run_attempt }}
