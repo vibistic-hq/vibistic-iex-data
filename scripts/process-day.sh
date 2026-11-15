@@ -53,7 +53,9 @@ if [ "$code" = 403 ]; then
     readable=""
     for back in 1 2 3 4 5 6 7 8 9 10; do
       prev="$(date -u -d "${d:0:4}-${d:4:2}-${d:6:2} -$back day" +%Y%m%d)"
-      [ "$(meta_code "$prev" "$meta")" = 200 ] && { readable="$prev"; break; }
+      # A 200 that then fails in transfer (curl 18, 28) is no proof either.
+      c="$(meta_code "$prev" "$meta")" || c="curl-failed"
+      [ "$c" = 200 ] && { readable="$prev"; break; }
     done
     rm -f "$meta"
     [ -n "$readable" ] || { echo "IEX's bucket has no readable file for $d or the 10 days before: closed?" >&2; exit 1; }

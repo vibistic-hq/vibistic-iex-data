@@ -29,10 +29,16 @@ if [ -n "$out" ] && [[ "$args" == *storage/v1/b/iex/o/* ]]; then
   # $dir/meta-prev, a generation by default.
   url="${args##* }"
   printf '%s\n' "$url" >> "$FAKE/meta-urls"
+  # $dir/meta-days lines "YYYYMMDD answer" override both for that day.
+  # Answers: curlexitN (no status, curl exits N), 200exitN (prints 200, exits N).
   answer="$(cat "$FAKE/meta")"
   [[ "$url" == *20010102* ]] || answer="$(cat "$FAKE/meta-prev" 2>/dev/null || echo 1)"
+  day="${url##*%2F}"; day="${day%%_*}"
+  over="$(awk -v d="$day" '$1 == d { print $2 }' "$FAKE/meta-days" 2>/dev/null)"
+  [ -n "$over" ] && answer="$over"
   case "$answer" in
     curlexit*) exit "${answer#curlexit}" ;;
+    200exit*) printf '{"generation":"1"}' > "$out"; printf 200; exit "${answer#200exit}" ;;
     401) printf 401 ;;
     404) printf 404 ;;
     500) printf 500 ;;
@@ -209,6 +215,16 @@ run 4 IEX_INCOMPLETE="$list"
 [ "$(cat "$list")" = "20010102 555" ] || { echo "FAIL: list holds: $(cat "$list")" >&2; exit 1; }
 run 5 IEX_INCOMPLETE="$list"
 want_downloads $((n + 1))
+# IEX replaces it (new generation in the bucket), now whole: read and written.
+echo 666 > "$dir/meta"
+echo 0 > "$dir/agg-rc"
+: > "$dir/download-args"
+run 0 IEX_INCOMPLETE="$list"
+want_downloads $((n + 2))
+grep -qF '?generation=666&alt=media' "$dir/download-args" || { echo "FAIL: replacement not downloaded by its generation" >&2; exit 1; }
+[ -s "$dir/out/20010102.jsonl.gz" ] || { echo "FAIL: replacement not written" >&2; exit 1; }
+rm -f "$dir/out/20010102.jsonl.gz"
+echo 4 > "$dir/agg-rc"
 # No object in the bucket (401 to anonymous callers, or 404) while an earlier
 # day's is readable: no file that day (exit 3), nothing downloaded.
 n=$(downloads)
@@ -245,7 +261,19 @@ done
 echo 401 > "$dir/meta"
 echo curlexit5 > "$dir/meta-prev"
 run 1 IEX_INCOMPLETE="$list"
-rm -f "$dir/meta-prev"
+# Nor does a 200 that then fails in transfer (curl 18, 28) prove it readable.
+for c in 18 28; do
+  echo "200exit$c" > "$dir/meta-prev"
+  run 1 IEX_INCOMPLETE="$list"
+done
+# ...but a later earlier day that is readable still is (2000-12-29 after 5
+# days that fail or are missing, as over a holiday week): exit 3.
+echo 401 > "$dir/meta-prev"
+printf '20010101 200exit18\n20001231 curlexit28\n20001229 7\n' > "$dir/meta-days"
+: > "$dir/meta-urls"
+run 3 IEX_INCOMPLETE="$list"
+[ "$(wc -l < "$dir/meta-urls" | tr -d ' ')" = 5 ] || { echo "FAIL: want 5 bucket checks, got $(wc -l < "$dir/meta-urls")" >&2; exit 1; }
+rm -f "$dir/meta-prev" "$dir/meta-days"
 want_downloads "$n"
 # The same for the index request itself.
 for c in 3 4 5 6; do
